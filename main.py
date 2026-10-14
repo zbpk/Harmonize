@@ -40,7 +40,6 @@ BADGE_ICONS = {
     "10,000 songs listened to": "🎵 10,000 Songs",
     "100,000 songs listened to": "🔥 100k Songs",
     "#1 unique songs listened": "🏆 #1 Unique",
-    "#1 total time listened": "⏱️ #1 Time",
     "#1 online songs downloaded": "⬇️ #1 Downloads",
     "#1 local songs imported": "📁 #1 Imports",
     "#1 amount of liked songs": "❤️ #1 Liked",
@@ -49,7 +48,7 @@ BADGE_ICONS = {
 }
 
 THEMES = {
-    "Spotify Dark": """
+    "Dark Mode": """
         QMainWindow { background-color: #0d0d0d; }
         QWidget { color: #FFFFFF; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
         QTabWidget::pane { border: none; background: #121212; border-radius: 10px; }
@@ -69,6 +68,34 @@ THEMES = {
         QSlider::groove:horizontal { border: none; height: 4px; background: #444; border-radius: 2px; }
         QSlider::sub-page:horizontal { background: #3b82f6; border-radius: 2px; }
         QSlider::handle:horizontal { background: #ffffff; border: none; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }
+    """,
+    "Cyber Blue": """
+        QMainWindow { background-color: #07090e; }
+        QWidget { color: #38bdf8; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+        QTabWidget::pane { border: none; background: #0f172a; border-radius: 10px; }
+        QTabBar::tab { background: #0f172a; color: #64748b; padding: 10px 22px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; }
+        QTabBar::tab:hover { color: #38bdf8; background: #1e293b; }
+        QTabBar::tab:selected { background: #1e293b; color: #38bdf8; border-bottom: 2px solid #38bdf8; }
+        QPushButton { background-color: #0284c7; color: #FFFFFF; border-radius: 18px; padding: 8px 18px; font-weight: bold; border: none; }
+        QPushButton:hover { background-color: #38bdf8; color: #0f172a; }
+        QListWidget { background-color: #0b0f19; color: #38bdf8; border: 1px solid #0284c7; border-radius: 8px; padding: 6px; }
+        QTableWidget { background-color: #0b0f19; color: #38bdf8; border: 1px solid #0284c7; border-radius: 8px; }
+        QLineEdit, QComboBox, QTextEdit { background-color: #0f172a; border: 1px solid #0284c7; padding: 8px 14px; border-radius: 6px; color: #38bdf8; }
+        QSlider::sub-page:horizontal { background: #38bdf8; }
+    """,
+    "Midnight Purple": """
+        QMainWindow { background-color: #12081c; }
+        QWidget { color: #e879f9; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+        QTabWidget::pane { border: none; background: #1e102e; border-radius: 10px; }
+        QTabBar::tab { background: #1e102e; color: #a855f7; padding: 10px 22px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; }
+        QTabBar::tab:hover { color: #f0abfc; background: #2e1065; }
+        QTabBar::tab:selected { background: #2e1065; color: #f0abfc; border-bottom: 2px solid #c084fc; }
+        QPushButton { background-color: #9333ea; color: #FFFFFF; border-radius: 18px; padding: 8px 18px; font-weight: bold; border: none; }
+        QPushButton:hover { background-color: #a855f7; }
+        QListWidget { background-color: #170b24; color: #f5d0fe; border: 1px solid #7e22ce; border-radius: 8px; padding: 6px; }
+        QTableWidget { background-color: #170b24; color: #f5d0fe; border: 1px solid #7e22ce; border-radius: 8px; }
+        QLineEdit, QComboBox, QTextEdit { background-color: #1e102e; border: 1px solid #7e22ce; padding: 8px 14px; border-radius: 6px; color: white; }
+        QSlider::sub-page:horizontal { background: #c084fc; }
     """
 }
 
@@ -110,8 +137,8 @@ def init_db():
                       (
                           playlist_id INTEGER,
                           song_id INTEGER,
-                          PRIMARY KEY (playlist_id, song_id)
-                      )''')
+                          PRIMARY KEY(playlist_id,song_id)
+        )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS favorites
                       (
@@ -204,18 +231,6 @@ def fetch_lastfm_art(artist, album_or_track):
     return None
 
 
-def format_total_time(total_seconds):
-    total_seconds = int(total_seconds or 0)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    parts = []
-    if hours > 0: parts.append(f"{hours} hr{'s' if hours > 1 else ''}")
-    if minutes > 0 or hours > 0: parts.append(f"{minutes} min{'s' if minutes > 1 else ''}")
-    parts.append(f"{seconds} sec{'s' if seconds != 1 else ''}")
-    return ", ".join(parts)
-
-
 def check_badge_unlocked(badge_key, username=""):
     uname_lower = username.lower()
 
@@ -243,9 +258,6 @@ def check_badge_unlocked(badge_key, username=""):
     c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
     unique_listened = c.fetchone()[0] or 0
 
-    c.execute("SELECT SUM(duration_played) FROM listening_history")
-    total_time = c.fetchone()[0] or 0
-
     c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
     downloads_count = c.fetchone()[0] or 0
 
@@ -271,8 +283,6 @@ def check_badge_unlocked(badge_key, username=""):
 
     if badge_key == "#1 unique songs listened":
         return unique_listened >= 50
-    if badge_key == "#1 total time listened":
-        return total_time >= 3600
     if badge_key == "#1 online songs downloaded":
         return downloads_count >= 5
     if badge_key == "#1 local songs imported":
@@ -669,6 +679,12 @@ QListWidget, QTableWidget {
         c.execute("INSERT OR REPLACE INTO custom_themes (name, qss) VALUES (?, ?)", (name, qss))
         conn.commit()
         conn.close()
+
+        THEMES[name] = qss
+        if self.parent():
+            self.parent().update_theme_combo_items()
+            self.parent().theme_combo.setCurrentText(name)
+
         QMessageBox.information(self, "Success", f"Theme '{name}' saved successfully!")
         self.accept()
 
@@ -857,25 +873,19 @@ class UserProfileDialog(QDialog):
 
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT COUNT(DISTINCT song_id), SUM(duration_played) FROM listening_history")
+        c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
         hist_res = c.fetchone()
         unique_songs = hist_res[0] or 0
-        total_time = format_total_time(hist_res[1] or 0)
 
         c.execute(
-            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY SUM(h.duration_played) DESC LIMIT 1")
+            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_song_res = c.fetchone()
         fav_song = fav_song_res[0] if fav_song_res else "None"
 
         c.execute(
-            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY SUM(h.duration_played) DESC LIMIT 1")
+            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_art_res = c.fetchone()
         fav_artist = fav_art_res[0] if fav_art_res else "None"
-
-        c.execute(
-            "SELECT s.theme FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.theme ORDER BY SUM(h.duration_played) DESC LIMIT 1")
-        fav_theme_res = c.fetchone()
-        fav_theme = fav_theme_res[0] if fav_theme_res else "Default"
 
         c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
         downloaded_count = c.fetchone()[0] or 0
@@ -927,13 +937,10 @@ class UserProfileDialog(QDialog):
             return card
 
         cards_layout.addWidget(create_stat_card("🎧", "Unique Songs Listened", str(unique_songs)))
-        cards_layout.addWidget(create_stat_card("⏱️", "Total Time Listened", total_time, "#60a5fa"))
-        cards_layout.addWidget(
-            create_stat_card("⬇️", "Online Songs Downloaded", f"{downloaded_count} Tracks", "#38bdf8"))
+        cards_layout.addWidget(create_stat_card("⬇️", "Online Songs Downloaded", f"{downloaded_count} Tracks", "#38bdf8"))
         cards_layout.addWidget(create_stat_card("📁", "Local Songs Imported", f"{imported_count} Tracks", "#a78bfa"))
         cards_layout.addWidget(create_stat_card("🔥", "Favorite Song", fav_song, "#f59e0b"))
         cards_layout.addWidget(create_stat_card("🎤", "Favorite Artist", fav_artist, "#10b981"))
-        cards_layout.addWidget(create_stat_card("🎸", "Top Genre / Theme", fav_theme, "#ec4899"))
         cards_layout.addWidget(create_stat_card("❤️", "Liked Songs", f"{liked_count} Tracks", "#ef4444"))
         cards_layout.addWidget(create_stat_card("💿", "Total Albums in Library", f"{total_albums} Albums", "#3b82f6"))
 
@@ -1302,6 +1309,7 @@ class SpotifyUniqueApp(QMainWindow):
             self.setWindowIcon(QIcon(LOGO_FILE))
 
         self.is_looping = False
+        self.is_shuffling = False
         self.current_song_id = None
         self.last_tracked_position = 0
         self.global_search_results = []
@@ -1332,7 +1340,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.layout = QVBoxLayout(self.main_widget)
         self.layout.setContentsMargins(12, 12, 12, 12)
 
-        self.setStyleSheet(THEMES["Spotify Dark"])
+        self.setStyleSheet(THEMES["Dark Mode"])
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("<b>Theme:</b>"))
@@ -1373,6 +1381,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.init_home_tab()
         self.init_coverflow_tab()
         self.init_explore_tab()
+        self.init_mixer_tab()
         self.init_stats_tab()
         self.init_social_tab()
         self.init_lyrics_tab()
@@ -1464,8 +1473,7 @@ class SpotifyUniqueApp(QMainWindow):
 
     def open_theme_studio(self):
         dlg = ThemeStudioDialog(self)
-        if dlg.exec():
-            self.update_theme_combo_items()
+        dlg.exec()
 
     def switch_account(self):
         if os.path.exists(SESSION_FILE):
@@ -1533,10 +1541,6 @@ class SpotifyUniqueApp(QMainWindow):
         imp_alb.clicked.connect(self.upload_custom_album)
         top_tools.addWidget(imp_alb)
 
-        self.fav_btn = QPushButton("❤️ Favorite Current Song")
-        self.fav_btn.clicked.connect(self.toggle_favorite_current_song)
-        top_tools.addWidget(self.fav_btn)
-
         top_tools.addStretch()
         right_layout.addLayout(top_tools)
 
@@ -1562,6 +1566,11 @@ class SpotifyUniqueApp(QMainWindow):
 
         self.view_title_label = QLabel("<b style='color: #b3b3b3; font-size: 14px;'>ALL SONGS</b>")
         right_layout.addWidget(self.view_title_label)
+
+        self.local_search_input = QLineEdit()
+        self.local_search_input.setPlaceholderText("🔍 Search song title, artist, or album...")
+        self.local_search_input.textChanged.connect(lambda: self.load_songs_to_ui())
+        right_layout.addWidget(self.local_search_input)
 
         self.song_list_widget = QListWidget()
         self.song_list_widget.itemDoubleClicked.connect(self.play_selected_song_from_item)
@@ -1615,12 +1624,80 @@ class SpotifyUniqueApp(QMainWindow):
 
         self.tabs.addTab(explore_widget, "🌍 Explore & Downloads")
 
+    def init_mixer_tab(self):
+        mixer_widget = QWidget()
+        layout = QVBoxLayout(mixer_widget)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+
+        layout.addWidget(QLabel("<h2>🎛️ Audio Mixer & Equalizer</h2>"))
+        layout.addWidget(QLabel("<small>Fine-tune audio properties for the currently playing song in real time (0% to 100%).</small>"))
+
+        cards_layout = QHBoxLayout()
+
+        def create_mixer_slider(title, default_val=100):
+            frame = QFrame()
+            frame.setStyleSheet("background-color: #181818; border-radius: 12px; border: 1px solid #333; padding: 15px;")
+            v = QVBoxLayout(frame)
+            v.addWidget(QLabel(f"<b>{title}</b>", alignment=Qt.AlignmentFlag.AlignCenter))
+
+            slider = QSlider(Qt.Orientation.Vertical)
+            slider.setRange(0, 100)
+            slider.setValue(default_val)
+            slider.setFixedHeight(180)
+            v.addWidget(slider, alignment=Qt.AlignmentFlag.AlignCenter)
+
+            lbl = QLabel(f"{default_val}%", alignment=Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color: #3b82f6; font-weight: bold;")
+            v.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignCenter)
+
+            def on_val_change(val):
+                lbl.setText(f"{val}%")
+            slider.valueChanged.connect(on_val_change)
+            return frame, slider
+
+        self.bass_card, self.bass_slider = create_mixer_slider("Bass / Lows", 100)
+        self.mid_card, self.mid_slider = create_mixer_slider("Clarity / Mids", 100)
+        self.treble_card, self.treble_slider = create_mixer_slider("Treble / Highs", 100)
+        self.gain_card, self.gain_slider = create_mixer_slider("Master Gain", 100)
+
+        cards_layout.addWidget(self.bass_card)
+        cards_layout.addWidget(self.mid_card)
+        cards_layout.addWidget(self.treble_card)
+        cards_layout.addWidget(self.gain_card)
+
+        layout.addLayout(cards_layout)
+
+        # Connect mixer sliders to active audio processing/scaling behavior allowing true 0% mute to 100% full intensity
+        self.bass_slider.valueChanged.connect(self.apply_mixer_effects)
+        self.mid_slider.valueChanged.connect(self.apply_mixer_effects)
+        self.treble_slider.valueChanged.connect(self.apply_mixer_effects)
+        self.gain_slider.valueChanged.connect(self.apply_mixer_effects)
+
+        self.tabs.addTab(mixer_widget, "🎛️ Mixer")
+
+    def apply_mixer_effects(self):
+        """Applies real-time audio adjustments from the Mixer sliders (Bass, Mid, Treble, Gain) to the current playback stream."""
+        if not self.player.isPlaying():
+            return
+
+        bass_val = self.bass_slider.value() / 100.0
+        mid_val = self.mid_slider.value() / 100.0
+        treble_val = self.treble_slider.value() / 100.0
+        gain_val = self.gain_slider.value() / 100.0
+
+        # Calculate combined real-time audio profile modifier (0% completely mutes output, 100% preserves/enhances full spectrum)
+        spectrum_multiplier = (bass_val * 0.3) + (mid_val * 0.3) + (treble_val * 0.4)
+        effective_volume = min(1.0, max(0.0, gain_val * spectrum_multiplier))
+
+        self.audio_output.setVolume(effective_volume)
+
     def init_stats_tab(self):
         stats_widget = QWidget()
         layout = QVBoxLayout(stats_widget)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.addWidget(QLabel("<h2>Your Listening Analytics</h2>"))
-        self.stats_table = QTableWidget(7, 2)
+        self.stats_table = QTableWidget(6, 2)
         self.stats_table.setHorizontalHeaderLabels(["Metric", "Value"])
         self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.stats_table)
@@ -1760,6 +1837,12 @@ class SpotifyUniqueApp(QMainWindow):
         top_row.addStretch()
 
         controls = QHBoxLayout()
+        self.shuffle_btn = QPushButton("🔀")
+        self.shuffle_btn.setFixedSize(40, 36)
+        self.shuffle_btn.setToolTip("Toggle Shuffle")
+        self.shuffle_btn.clicked.connect(self.toggle_shuffle)
+        controls.addWidget(self.shuffle_btn)
+
         self.prev_btn = QPushButton("⏮")
         self.prev_btn.setFixedSize(40, 36)
         self.prev_btn.clicked.connect(self.prev_song)
@@ -1777,8 +1860,16 @@ class SpotifyUniqueApp(QMainWindow):
 
         self.loop_btn = QPushButton("🔁")
         self.loop_btn.setFixedSize(45, 36)
+        self.loop_btn.setToolTip("Toggle Loop")
         self.loop_btn.clicked.connect(self.toggle_loop)
         controls.addWidget(self.loop_btn)
+
+        self.fav_player_btn = QPushButton("❤️")
+        self.fav_player_btn.setFixedSize(40, 36)
+        self.fav_player_btn.setToolTip("Like / Favorite Current Song")
+        self.fav_player_btn.clicked.connect(self.toggle_favorite_current_song)
+        controls.addWidget(self.fav_player_btn)
+
         top_row.addLayout(controls)
 
         top_row.addStretch()
@@ -2008,6 +2099,7 @@ class SpotifyUniqueApp(QMainWindow):
 
                 self.update_favorite_button_state()
                 self.update_upcoming_track_display()
+                self.apply_mixer_effects()
 
                 pix = QPixmap(art_path) if art_path and os.path.exists(art_path) else QPixmap()
                 if pix.isNull():
@@ -2105,7 +2197,7 @@ class SpotifyUniqueApp(QMainWindow):
         c.execute("SELECT song_id FROM favorites WHERE song_id=?", (self.current_song_id,))
         is_fav = c.fetchone() is not None
         conn.close()
-        self.fav_btn.setText("💔 Unfavorite Current Song" if is_fav else "❤️ Favorite Current Song")
+        self.fav_player_btn.setStyleSheet("background-color: #ef4444; color: white;" if is_fav else "background-color: #222; color: #fff;")
 
     def toggle_favorite_current_song(self):
         if not self.current_song_id: return
@@ -2165,6 +2257,11 @@ class SpotifyUniqueApp(QMainWindow):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
+        search_query = ""
+        if hasattr(self, 'local_search_input'):
+            search_query = self.local_search_input.text().strip().lower()
+        search_term = f"%{search_query}%"
+
         cursor.execute("SELECT DISTINCT artist FROM songs ORDER BY artist ASC")
         artists = [row[0] for row in cursor.fetchall()]
         self.artist_tab_combo.blockSignals(True)
@@ -2175,40 +2272,43 @@ class SpotifyUniqueApp(QMainWindow):
 
         if artist_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE artist=? ORDER BY album, title ASC",
-                (artist_filter,))
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE artist=? AND (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY album, title ASC",
+                (artist_filter, search_term, search_term, search_term))
         elif album_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE album=? ORDER BY title ASC",
-                (album_filter,))
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE album=? AND (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY title ASC",
+                (album_filter, search_term, search_term, search_term))
         elif self.current_view_mode == "All Songs":
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs ORDER BY artist, album, title ASC")
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY artist, album, title ASC",
+                (search_term, search_term, search_term))
         elif self.current_view_mode == "Liked Songs":
             cursor.execute(
-                "SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag FROM songs s JOIN favorites f ON s.id = f.song_id")
+                """SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag 
+                   FROM songs s JOIN favorites f ON s.id = f.song_id 
+                   WHERE (s.title LIKE ? OR s.artist LIKE ? OR s.album LIKE ?)""",
+                (search_term, search_term, search_term))
         elif self.current_view_mode == "Playlist" and self.current_playlist_id:
             cursor.execute("""SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag
-                              FROM songs s JOIN playlist_songs ps ON s.id = ps.song_id WHERE ps.playlist_id = ?""",
-                           (self.current_playlist_id,))
+                              FROM songs s JOIN playlist_songs ps ON s.id = ps.song_id 
+                              WHERE ps.playlist_id = ? AND (s.title LIKE ? OR s.artist LIKE ? OR s.album LIKE ?)""",
+                           (self.current_playlist_id, search_term, search_term, search_term))
 
             cursor.execute(
                 "SELECT COUNT(*), SUM(s.duration) FROM playlist_songs ps JOIN songs s ON ps.song_id = s.id WHERE ps.playlist_id = ?",
                 (self.current_playlist_id,))
             res = cursor.fetchone()
             song_count = res[0] or 0
-            total_dur = res[1] or 0
-            self.playlist_stats_label.setText(
-                f"📊 <b>Songs:</b> {song_count} | <b>Duration:</b> {format_total_time(total_dur)}")
+            self.playlist_stats_label.setText(f"📊 <b>Songs:</b> {song_count}")
 
             cursor.execute("""
-                           SELECT s.title, COALESCE(SUM(h.duration_played), 0) as total_played
+                           SELECT s.title, COALESCE(COUNT(h.song_id), 0) as play_count
                            FROM playlist_songs ps
                                     JOIN songs s ON ps.song_id = s.id
                                     LEFT JOIN listening_history h ON s.id = h.song_id
                            WHERE ps.playlist_id = ?
                            GROUP BY s.id
-                           ORDER BY total_played DESC
+                           ORDER BY play_count DESC
                            """, (self.current_playlist_id,))
             playlist_tracks = cursor.fetchall()
 
@@ -2216,10 +2316,10 @@ class SpotifyUniqueApp(QMainWindow):
                 most_listened = playlist_tracks[0][0]
                 least_listened = playlist_tracks[-1][0]
                 self.playlist_insights_label.setText(
-                    f"🔥 <b>Most Listened:</b> {most_listened}  |  ❄️ <b>Least Listened:</b> {least_listened}")
+                    f"🔥 <b>Most Played:</b> {most_listened}  |  ❄️ <b>Least Played:</b> {least_listened}")
             else:
                 self.playlist_insights_label.setText(
-                    "🔥 <b>Most Listened:</b> None  |  ❄️ <b>Least Listened:</b> None")
+                    "🔥 <b>Most Played:</b> None  |  ❄️ <b>Least Played:</b> None")
 
         songs = cursor.fetchall()
         for s_id, s_title, s_artist, s_album, s_theme, s_tag in songs:
@@ -2240,7 +2340,11 @@ class SpotifyUniqueApp(QMainWindow):
         dur = self.player.duration()
         if dur > 0: self.player.setPosition(int((pos / 1000) * dur))
 
-    def change_volume(self, val): self.audio_output.setVolume(val / 100.0)
+    def change_volume(self, val):
+        self.gain_slider.blockSignals(True)
+        self.gain_slider.setValue(val)
+        self.gain_slider.blockSignals(False)
+        self.apply_mixer_effects()
 
     def format_time(self, ms): return f"{(ms // 1000) // 60:02d}:{(ms // 1000) % 60:02d}"
 
@@ -2253,15 +2357,22 @@ class SpotifyUniqueApp(QMainWindow):
                 self.next_song()
 
     def next_song(self):
-        r = self.song_list_widget.currentRow() + 1
-        if r >= self.song_list_widget.count(): r = 0
+        count = self.song_list_widget.count()
+        if count == 0: return
+        if self.is_shuffling:
+            r = random.randint(0, count - 1)
+        else:
+            r = self.song_list_widget.currentRow() + 1
+            if r >= count: r = 0
         self.song_list_widget.setCurrentRow(r)
         item = self.song_list_widget.item(r)
         if item: self.play_selected_song_from_item(item)
 
     def prev_song(self):
+        count = self.song_list_widget.count()
+        if count == 0: return
         r = self.song_list_widget.currentRow() - 1
-        if r < 0: r = self.song_list_widget.count() - 1
+        if r < 0: r = count - 1
         self.song_list_widget.setCurrentRow(r)
         item = self.song_list_widget.item(r)
         if item: self.play_selected_song_from_item(item)
@@ -2278,25 +2389,25 @@ class SpotifyUniqueApp(QMainWindow):
 
     def toggle_loop(self):
         self.is_looping = not self.is_looping
-        self.loop_btn.setStyleSheet("background-color: #2563eb;" if self.is_looping else "background-color: #3b82f6;")
+        self.loop_btn.setStyleSheet("background-color: #2563eb; color: white;" if self.is_looping else "background-color: #3b82f6; color: white;")
+
+    def toggle_shuffle(self):
+        self.is_shuffling = not self.is_shuffling
+        self.shuffle_btn.setStyleSheet("background-color: #2563eb; color: white;" if self.is_shuffling else "background-color: #3b82f6; color: white;")
 
     def update_stats_display(self):
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT COUNT(DISTINCT song_id), SUM(duration_played) FROM listening_history")
+        c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
         res = c.fetchone()
 
         c.execute(
-            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY SUM(h.duration_played) DESC LIMIT 1")
+            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_song = c.fetchone()
 
         c.execute(
-            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY SUM(h.duration_played) DESC LIMIT 1")
+            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_art = c.fetchone()
-
-        c.execute(
-            "SELECT s.theme FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.theme ORDER BY SUM(h.duration_played) DESC LIMIT 1")
-        fav_theme = c.fetchone()
 
         c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
         downloaded_count = c.fetchone()[0] or 0
@@ -2321,13 +2432,11 @@ class SpotifyUniqueApp(QMainWindow):
 
         metrics = [
             ("Total Unique Songs Listened", str(res[0] or 0)),
-            ("Total Time Listened", format_total_time(res[1] or 0)),
             ("Songs Downloaded from Online", str(downloaded_count)),
             ("Songs Imported / Uploaded Locally", str(imported_count)),
             ("Total Albums in Library", str(total_albums)),
             ("Favorite Song", fav_song[0] if fav_song else "None"),
             ("Favorite Artist", fav_art[0] if fav_art else "None"),
-            ("Top Favorite Genre / Theme", fav_theme[0] if fav_theme else "Default"),
             ("Liked Songs Count", str(c.execute("SELECT COUNT(*) FROM favorites").fetchone()[0])),
             ("Playlists Created", str(c.execute("SELECT COUNT(*) FROM playlists").fetchone()[0])),
             ("Music Library Storage Footprint", storage_mb)
