@@ -1,13 +1,15 @@
 import sys
 import os
 import shutil
-import sqlite3
 import subprocess
 import json
 import requests
 import random
 import datetime
 from mutagen import File
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer, QSize, QRectF
 from PyQt6.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QIcon, QAction, QPainterPath
@@ -26,10 +28,7 @@ ALLOWED_EXTENSIONS = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.aiff', 
 SESSION_FILE = "current_session.json"
 LOGO_FILE = "logo.png"
 
-# STRICT OWNER CONSTANT: Only this username is allowed to hold owner rights / features
 OWNER_USERNAME = "sam"
-
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music_app.db")
 LASTFM_API_KEY = "2d0c2e36bb93160a2b0e271bf1bc9ef2"
 
 BADGE_ICONS = {
@@ -48,7 +47,7 @@ BADGE_ICONS = {
 }
 
 THEMES = {
-    "Dark Mode": """
+    "Spotify Dark": """
         QMainWindow { background-color: #0d0d0d; }
         QWidget { color: #FFFFFF; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
         QTabWidget::pane { border: none; background: #121212; border-radius: 10px; }
@@ -59,9 +58,9 @@ THEMES = {
         QPushButton:hover { background-color: #60a5fa; }
         QPushButton:pressed { background-color: #2563eb; }
         QListWidget { background-color: #181818; color: #e1e1e1; border: 1px solid #222; border-radius: 8px; padding: 6px; outline: none; }
-        QListWidget::item { background: transparent; border: none; padding: 0px; margin: 0px; }
+        QListWidget::item { background: transparent; border-bottom: 1px solid #222; padding: 8px; margin: 2px 0px; border-radius: 4px; }
         QListWidget::item:hover { background-color: #242424; }
-        QListWidget::item:selected { background-color: #2a2a2a; }
+        QListWidget::item:selected { background-color: #2a2a2a; color: #3b82f6; }
         QTableWidget { background-color: #181818; color: #FFFFFF; border: 1px solid #222; border-radius: 8px; gridline-color: #222; selection-background-color: #282828; }
         QHeaderView::section { background-color: #1f1f1f; color: #b3b3b3; padding: 10px; border: none; font-weight: bold; }
         QLineEdit, QComboBox, QTextEdit { background-color: #222222; border: 1px solid #333; padding: 8px 14px; border-radius: 6px; color: white; }
@@ -79,6 +78,8 @@ THEMES = {
         QPushButton { background-color: #0284c7; color: #FFFFFF; border-radius: 18px; padding: 8px 18px; font-weight: bold; border: none; }
         QPushButton:hover { background-color: #38bdf8; color: #0f172a; }
         QListWidget { background-color: #0b0f19; color: #38bdf8; border: 1px solid #0284c7; border-radius: 8px; padding: 6px; }
+        QListWidget::item { border-bottom: 1px solid #0f172a; padding: 8px; }
+        QListWidget::item:hover { background-color: #1e293b; }
         QTableWidget { background-color: #0b0f19; color: #38bdf8; border: 1px solid #0284c7; border-radius: 8px; }
         QLineEdit, QComboBox, QTextEdit { background-color: #0f172a; border: 1px solid #0284c7; padding: 8px 14px; border-radius: 6px; color: #38bdf8; }
         QSlider::sub-page:horizontal { background: #38bdf8; }
@@ -93,6 +94,8 @@ THEMES = {
         QPushButton { background-color: #9333ea; color: #FFFFFF; border-radius: 18px; padding: 8px 18px; font-weight: bold; border: none; }
         QPushButton:hover { background-color: #a855f7; }
         QListWidget { background-color: #170b24; color: #f5d0fe; border: 1px solid #7e22ce; border-radius: 8px; padding: 6px; }
+        QListWidget::item { border-bottom: 1px solid #1f1030; padding: 8px; }
+        QListWidget::item:hover { background-color: #27133f; }
         QTableWidget { background-color: #170b24; color: #f5d0fe; border: 1px solid #7e22ce; border-radius: 8px; }
         QLineEdit, QComboBox, QTextEdit { background-color: #1e102e; border: 1px solid #7e22ce; padding: 8px 14px; border-radius: 6px; color: white; }
         QSlider::sub-page:horizontal { background: #c084fc; }
@@ -100,95 +103,151 @@ THEMES = {
 }
 
 
+def get_db_connection():
+    return psycopg2.connect(
+        dbname="postgres",
+        user="postgres.obvnvvhvfvzlhfshoiue",
+        password="52?0~pr?+K0gD6%6?",
+        host="aws-0-us-east-1.pooler.supabase.com",
+        port=5432,
+        cursor_factory=RealDictCursor
+    )
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS songs
                       (
-                          id INTEGER PRIMARY KEY,
-                          title TEXT,
-                          artist TEXT,
-                          album TEXT,
-                          year TEXT,
-                          theme TEXT,
-                          source_tag TEXT,
-                          duration INTEGER,
-                          file_path TEXT,
-                          lyrics TEXT,
-                          album_art_path TEXT
+                          id
+                          SERIAL
+                          PRIMARY
+                          KEY,
+                          title
+                          TEXT,
+                          artist
+                          TEXT,
+                          album
+                          TEXT,
+                          year
+                          TEXT,
+                          theme
+                          TEXT,
+                          source_tag
+                          TEXT,
+                          duration
+                          INTEGER,
+                          file_path
+                          TEXT,
+                          lyrics
+                          TEXT,
+                          album_art_path
+                          TEXT
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS listening_history
                       (
-                          id INTEGER PRIMARY KEY,
-                          song_id INTEGER,
-                          duration_played INTEGER
+                          id
+                          SERIAL
+                          PRIMARY
+                          KEY,
+                          song_id
+                          INTEGER,
+                          duration_played
+                          INTEGER
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS playlists
                       (
-                          id INTEGER PRIMARY KEY,
-                          name TEXT,
-                          creator TEXT
+                          id
+                          SERIAL
+                          PRIMARY
+                          KEY,
+                          name
+                          TEXT,
+                          creator
+                          TEXT
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS playlist_songs
+    (
+        playlist_id
+        INTEGER,
+        song_id
+        INTEGER,
+        PRIMARY
+        KEY
                       (
-                          playlist_id INTEGER,
-                          song_id INTEGER,
-                          PRIMARY KEY(playlist_id,song_id)
+        playlist_id,
+        song_id
+                      )
         )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS favorites
                       (
-                          song_id INTEGER PRIMARY KEY
+                          song_id
+                          INTEGER
+                          PRIMARY
+                          KEY
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS users
                       (
-                          id INTEGER PRIMARY KEY AUTOINCREMENT,
-                          username TEXT UNIQUE COLLATE NOCASE,
-                          password TEXT,
-                          status TEXT,
-                          last_seen TEXT,
-                          profile_pic_path TEXT,
-                          bio TEXT,
-                          status_message TEXT,
-                          favorite_genre TEXT,
-                          badge TEXT
+                          id
+                          SERIAL
+                          PRIMARY
+                          KEY,
+                          username
+                          TEXT
+                          UNIQUE,
+                          password
+                          TEXT,
+                          status
+                          TEXT,
+                          last_seen
+                          TEXT,
+                          profile_pic_path
+                          TEXT,
+                          bio
+                          TEXT,
+                          status_message
+                          TEXT,
+                          favorite_genre
+                          TEXT,
+                          badge
+                          TEXT
                       )''')
-
-    cursor.execute("PRAGMA table_info(users)")
-    existing_u_cols = [col[1] for col in cursor.fetchall()]
-    if 'last_seen' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
-    if 'profile_pic_path' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN profile_pic_path TEXT")
-    if 'bio' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN bio TEXT")
-    if 'status_message' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN status_message TEXT")
-    if 'favorite_genre' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN favorite_genre TEXT")
-    if 'badge' not in existing_u_cols:
-        cursor.execute("ALTER TABLE users ADD COLUMN badge TEXT")
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS follows
+    (
+        follower_username
+        TEXT,
+        following_username
+        TEXT,
+        PRIMARY
+        KEY
                       (
-                          follower_username TEXT,
-                          following_username TEXT,
-                          PRIMARY KEY (follower_username, following_username)
-                      )''')
+        follower_username,
+        following_username
+                      )
+        )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS custom_themes
                       (
-                          id INTEGER PRIMARY KEY,
-                          name TEXT UNIQUE,
-                          qss TEXT
+                          id
+                          SERIAL
+                          PRIMARY
+                          KEY,
+                          name
+                          TEXT
+                          UNIQUE,
+                          qss
+                          TEXT
                       )''')
 
     conn.commit()
+    cursor.close()
     conn.close()
 
 
@@ -241,35 +300,37 @@ def check_badge_unlocked(badge_key, username=""):
     if badge_key == "tester":
         if uname_lower == OWNER_USERNAME.lower():
             return True
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT badge FROM users WHERE username=?", (username,))
+        c.execute("SELECT badge FROM users WHERE username=%s", (username,))
         row = c.fetchone()
+        c.close()
         conn.close()
-        badges_str = row[0] if row and row[0] else ""
+        badges_str = row['badge'] if row and row['badge'] else ""
         return "tester" in [b.strip().lower() for b in badges_str.split(",")]
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
 
     c.execute("SELECT COUNT(song_id) FROM listening_history")
-    total_listened = c.fetchone()[0] or 0
+    total_listened = c.fetchone()['count'] or 0
 
     c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
-    unique_listened = c.fetchone()[0] or 0
+    unique_listened = c.fetchone()['count'] or 0
 
-    c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
-    downloads_count = c.fetchone()[0] or 0
+    c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+    downloads_count = c.fetchone()['count'] or 0
 
     c.execute(
-        "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Upload%' OR source_tag LIKE '%Import%' OR source_tag LIKE '%Digital%'")
-    imports_count = c.fetchone()[0] or 0
+        "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+    imports_count = c.fetchone()['count'] or 0
 
     c.execute("SELECT COUNT(*) FROM favorites")
-    liked_count = c.fetchone()[0] or 0
+    liked_count = c.fetchone()['count'] or 0
 
     c.execute("SELECT COUNT(DISTINCT album) FROM songs")
-    albums_count = c.fetchone()[0] or 0
+    albums_count = c.fetchone()['count'] or 0
+    c.close()
     conn.close()
 
     if badge_key == "100 songs listened to":
@@ -347,6 +408,76 @@ class SearchWorker(QThread):
             self.results_ready.emit(songs)
         except Exception:
             self.results_ready.emit([])
+
+
+class BackgroundFetchWorker(QThread):
+    data_ready = pyqtSignal(list)
+
+    def __init__(self, query_type, extra_arg=None):
+        super().__init__()
+        self.query_type = query_type
+        self.extra_arg = extra_arg
+
+    def run(self):
+        conn = None
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+
+            if self.query_type == "albums":
+                c.execute(
+                    "SELECT album, artist, year, theme, album_art_path, COUNT(*) FROM songs GROUP BY album, artist, year, theme, album_art_path")
+                self.data_ready.emit(c.fetchall())
+            elif self.query_type == "social":
+                c.execute("SELECT id, username, status, last_seen, status_message, badge FROM users ORDER BY id ASC")
+                users = c.fetchall()
+                results = []
+                for row in users:
+                    u = row['username']
+                    c.execute("SELECT COUNT(*) FROM follows WHERE LOWER(following_username)=LOWER(%s)", (u,))
+                    f_count = c.fetchone()['count'] or 0
+                    c.execute("SELECT COUNT(*) FROM follows WHERE LOWER(follower_username)=LOWER(%s)", (u,))
+                    following_count = c.fetchone()['count'] or 0
+                    results.append({**row, "followers": f_count, "following": following_count})
+                self.data_ready.emit(results)
+            elif self.query_type == "stats":
+                c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
+                res = c.fetchone()
+                c.execute(
+                    "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+                fav_song = c.fetchone()
+                c.execute(
+                    "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+                fav_art = c.fetchone()
+                c.execute(
+                    "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+                dl_count = c.fetchone()['count'] or 0
+                c.execute(
+                    "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+                imp_count = c.fetchone()['count'] or 0
+                c.execute("SELECT COUNT(DISTINCT album) FROM songs")
+                albums_count = c.fetchone()['count'] or 0
+                c.execute("SELECT COUNT(*) FROM favorites")
+                fav_cnt = c.fetchone()['count'] or 0
+                c.execute("SELECT COUNT(*) FROM playlists")
+                pl_cnt = c.fetchone()['count'] or 0
+
+                self.data_ready.emit([{
+                    "unique_songs": res['count'] or 0,
+                    "fav_song": fav_song['title'] if fav_song else "None",
+                    "fav_art": fav_art['artist'] if fav_art else "None",
+                    "dl_count": dl_count,
+                    "imp_count": imp_count,
+                    "albums_count": albums_count,
+                    "fav_cnt": fav_cnt,
+                    "pl_cnt": pl_cnt
+                }])
+            c.close()
+        except Exception:
+            self.data_ready.emit([])
+        finally:
+            if conn:
+                conn.close()
 
 
 class DownloadWorker(QThread):
@@ -470,46 +601,50 @@ class AuthWindow(QDialog):
             QMessageBox.warning(self, "Error", "Username cannot exceed 24 characters.")
             return
 
-        if self.is_signup and u.lower() == OWNER_USERNAME.lower():
-            QMessageBox.warning(self, "Access Denied", f"The username '{OWNER_USERNAME}' is reserved for the app owner.")
-            return
-
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn = get_db_connection()
             c = conn.cursor()
 
-            initial_badge = "owner" if u.lower() == OWNER_USERNAME.lower() else "member"
-
             if self.is_signup:
+                c.execute("SELECT COUNT(*) FROM users")
+                user_count = c.fetchone()['count'] or 0
+
+                initial_badge = "owner" if (user_count == 0 and u.lower() == OWNER_USERNAME.lower()) else "member"
+
                 try:
                     c.execute(
-                        "INSERT INTO users (username, password, status, status_message, bio, favorite_genre, badge) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO users (username, password, status, status_message, bio, favorite_genre, badge) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                         (u, p, "Active", "Listening to music...", "Music lover & enthusiast.", "Pop / Rock",
                          initial_badge))
                     conn.commit()
                     self.authenticated_user = u
+                    c.close()
                     conn.close()
 
                     self.hide()
                     self.accept()
-                except sqlite3.IntegrityError:
+                except psycopg2.errors.UniqueViolation:
+                    conn.rollback()
+                    c.close()
                     conn.close()
                     QMessageBox.warning(self, "Username Taken",
                                         f"The username '{u}' is already taken. Please choose a different unique username.")
             else:
-                c.execute("SELECT * FROM users WHERE username=? AND password=?", (u, p))
+                c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (u, p))
                 row = c.fetchone()
                 if row:
                     if u.lower() == OWNER_USERNAME.lower():
                         c.execute(
-                            "UPDATE users SET badge = CASE WHEN badge NOT LIKE '%owner%' THEN badge || ', owner' ELSE badge END WHERE username=?",
+                            "UPDATE users SET badge = CASE WHEN badge IS NULL OR badge = '' THEN 'owner' WHEN badge NOT LIKE '%%owner%%' THEN badge || ', owner' ELSE badge END WHERE username=%s",
                             (u,))
                         conn.commit()
+                    c.close()
                     conn.close()
-                    self.authenticated_user = row[1]
+                    self.authenticated_user = row['username']
                     self.hide()
                     self.accept()
                 else:
+                    c.close()
                     conn.close()
                     QMessageBox.warning(self, "Error", "Invalid username or password.")
         except Exception as e:
@@ -531,16 +666,17 @@ class ProfileEditorDialog(QDialog):
 
         layout.addWidget(QLabel("<h3>✏️ Manage Profile & Badges</h3>"))
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT bio, status_message, favorite_genre, badge FROM users WHERE username=?", (username,))
+        c.execute("SELECT bio, status_message, favorite_genre, badge FROM users WHERE username=%s", (username,))
         row = c.fetchone()
+        c.close()
         conn.close()
 
-        bio_val = row[0] if row and row[0] else ""
-        status_val = row[1] if row and row[1] else ""
-        genre_val = row[2] if row and row[2] else ""
-        current_badges_str = row[3] if row and row[3] else ""
+        bio_val = row['bio'] if row and row['bio'] else ""
+        status_val = row['status_message'] if row and row['status_message'] else ""
+        genre_val = row['favorite_genre'] if row and row['favorite_genre'] else ""
+        current_badges_str = row['badge'] if row and row['badge'] else ""
         user_badges = [b.strip().lower() for b in current_badges_str.split(",") if b.strip()]
 
         layout.addWidget(QLabel("Select Active Badges (Locked badges are un-earnable until requirements are met):"))
@@ -608,11 +744,12 @@ class ProfileEditorDialog(QDialog):
         new_bio = self.bio_input.toPlainText().strip()
 
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
-            c.execute("UPDATE users SET badge=?, status_message=?, favorite_genre=?, bio=? WHERE username=?",
+            c.execute("UPDATE users SET badge=%s, status_message=%s, favorite_genre=%s, bio=%s WHERE username=%s",
                       (new_badge_str, new_status, new_genre, new_bio, self.username))
             conn.commit()
+            c.close()
             conn.close()
             QMessageBox.information(self, "Success", "Profile updated successfully!")
             self.accept()
@@ -674,10 +811,13 @@ QListWidget, QTableWidget {
         if not name or not qss:
             QMessageBox.warning(self, "Error", "Theme Name and Code cannot be empty.")
             return
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO custom_themes (name, qss) VALUES (?, ?)", (name, qss))
+        c.execute(
+            "INSERT INTO custom_themes (name, qss) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET qss = EXCLUDED.qss",
+            (name, qss))
         conn.commit()
+        c.close()
         conn.close()
 
         THEMES[name] = qss
@@ -719,13 +859,14 @@ class PlaylistManagerDialog(QDialog):
 
     def populate_playlists(self):
         self.list_widget.clear()
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, name FROM playlists")
         for r in c.fetchall():
-            item = QListWidgetItem(f"📁 {r[1]} [ID:{r[0]}]")
-            item.setData(Qt.ItemDataRole.UserRole, r[0])
+            item = QListWidgetItem(f"📁 {r['name']} [ID:{r['id']}]")
+            item.setData(Qt.ItemDataRole.UserRole, r['id'])
             self.list_widget.addItem(item)
+        c.close()
         conn.close()
 
     def rename_playlist(self):
@@ -734,10 +875,11 @@ class PlaylistManagerDialog(QDialog):
             p_id = item.data(Qt.ItemDataRole.UserRole)
             new_name, ok = QInputDialog.getText(self, "Rename Playlist", "New Title:")
             if ok and new_name.strip():
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("UPDATE playlists SET name=? WHERE id=?", (new_name.strip(), p_id))
+                c.execute("UPDATE playlists SET name=%s WHERE id=%s", (new_name.strip(), p_id))
                 conn.commit()
+                c.close()
                 conn.close()
                 self.populate_playlists()
                 self.parent_app.load_playlists_to_sidebar()
@@ -752,15 +894,148 @@ class PlaylistManagerDialog(QDialog):
             confirm = QMessageBox.question(self, "Delete Playlist", "Are you sure you want to delete this playlist?",
                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if confirm == QMessageBox.StandardButton.Yes:
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("DELETE FROM playlists WHERE id=?", (p_id,))
-                c.execute("DELETE FROM playlist_songs WHERE playlist_id=?", (p_id,))
+                c.execute("DELETE FROM playlists WHERE id=%s", (p_id,))
+                c.execute("DELETE FROM playlist_songs WHERE playlist_id=%s", (p_id,))
                 conn.commit()
+                c.close()
                 conn.close()
                 self.populate_playlists()
                 self.parent_app.load_playlists_to_sidebar()
                 self.parent_app.switch_view("All Songs")
+
+
+class SongEditorDialog(QDialog):
+    def __init__(self, song_id, parent=None):
+        super().__init__(parent)
+        self.song_id = song_id
+        self.setWindowTitle("Edit Audio Metadata & Artwork")
+        self.setFixedSize(420, 440)
+        if os.path.exists(LOGO_FILE):
+            self.setWindowIcon(QIcon(LOGO_FILE))
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #161616;
+                color: #FFFFFF;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+            }
+            QLabel {
+                color: #FFFFFF;
+                background: transparent;
+            }
+            QLineEdit {
+                background-color: #222222;
+                border: 1px solid #333333;
+                padding: 6px 10px;
+                border-radius: 6px;
+                color: #FFFFFF;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+            }
+            QPushButton {
+                background-color: #3b82f6;
+                color: #FFFFFF;
+                border-radius: 16px;
+                padding: 8px 16px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #60a5fa;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("<h3>✏️ Edit Song Details & Cover Photo</h3>"))
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT title, artist, album, theme, source_tag, album_art_path FROM songs WHERE id=%s", (song_id,))
+        row = c.fetchone()
+        c.close()
+        conn.close()
+
+        self.title_input = QLineEdit(row['title'] if row else "")
+        self.artist_input = QLineEdit(row['artist'] if row else "")
+        self.album_input = QLineEdit(row['album'] if row else "")
+        self.theme_input = QLineEdit(row['theme'] if row else "")
+        self.tag_input = QLineEdit(row['source_tag'] if row else "")
+        self.art_path_val = row['album_art_path'] if row else ""
+
+        layout.addWidget(QLabel("Song Title:"))
+        layout.addWidget(self.title_input)
+
+        layout.addWidget(QLabel("Artist:"))
+        layout.addWidget(self.artist_input)
+
+        layout.addWidget(QLabel("Album Name:"))
+        layout.addWidget(self.album_input)
+
+        layout.addWidget(QLabel("Theme / Genre:"))
+        layout.addWidget(self.theme_input)
+
+        layout.addWidget(QLabel("Source Tag:"))
+        layout.addWidget(self.tag_input)
+
+        art_row = QHBoxLayout()
+        self.art_lbl = QLabel(f"Cover Path: {os.path.basename(self.art_path_val) if self.art_path_val else 'None'}")
+        self.art_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        art_row.addWidget(self.art_lbl)
+
+        pick_art_btn = QPushButton("📷 Choose Image")
+        pick_art_btn.clicked.connect(self.pick_artwork)
+        art_row.addWidget(pick_art_btn)
+        layout.addLayout(art_row)
+
+        save_btn = QPushButton("Save Audio Metadata")
+        save_btn.clicked.connect(self.save_metadata)
+        layout.addWidget(save_btn)
+
+    def pick_artwork(self):
+        f_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Album Artwork", "", "Image Files (*.png *.jpg *.jpeg *.webp)"
+        )
+        if f_path:
+            art_dir = os.path.join(MUSIC_FOLDER, "art_cache")
+            os.makedirs(art_dir, exist_ok=True)
+            dest = os.path.join(art_dir, f"custom_{self.song_id}{os.path.splitext(f_path)[1]}")
+            shutil.copy(f_path, dest)
+            self.art_path_val = dest
+            self.art_lbl.setText(f"Cover Path: {os.path.basename(dest)}")
+
+    def save_metadata(self):
+        t = self.title_input.text().strip()
+        a = self.artist_input.text().strip()
+        alb = self.album_input.text().strip()
+        th = self.theme_input.text().strip()
+        tag = self.tag_input.text().strip()
+
+        if not t:
+            QMessageBox.warning(self, "Error", "Song title cannot be empty.")
+            return
+
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute(
+                "UPDATE songs SET title=%s, artist=%s, album=%s, theme=%s, source_tag=%s, album_art_path=%s WHERE id=%s",
+                (t, a, alb, th, tag, self.art_path_val, self.song_id)
+            )
+            conn.commit()
+            c.close()
+            conn.close()
+            QMessageBox.information(self, "Success", "Song details updated successfully!")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update metadata: {str(e)}")
 
 
 class UserProfileDialog(QDialog):
@@ -768,6 +1043,7 @@ class UserProfileDialog(QDialog):
         super().__init__(parent)
         self.username = username
         self.current_user = current_user
+        self.parent_app = parent
         self.setWindowTitle(f"Profile: {username}")
         self.setFixedSize(480, 720)
         if os.path.exists(LOGO_FILE):
@@ -777,17 +1053,24 @@ class UserProfileDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, status, status_message, bio, favorite_genre, badge FROM users WHERE username=?",
+        c.execute("SELECT id, status, status_message, bio, favorite_genre, badge FROM users WHERE username=%s",
                   (username,))
         user_row = c.fetchone()
-        user_id = user_row[0] if user_row else 1
-        status = user_row[1] if user_row and user_row[1] else "Active Listener"
-        status_msg = user_row[2] if user_row and user_row[2] else "No status message set."
-        bio = user_row[3] if user_row and user_row[3] else "No bio available."
-        fav_genre = user_row[4] if user_row and user_row[4] else "Not specified"
-        badge_raw = user_row[5] if user_row and user_row[5] else "member"
+        user_id = user_row['id'] if user_row else 1
+        status = user_row['status'] if user_row and user_row['status'] else "Active Listener"
+        status_msg = user_row['status_message'] if user_row and user_row['status_message'] else "No status message set."
+        bio = user_row['bio'] if user_row and user_row['bio'] else "No bio available."
+        fav_genre = user_row['favorite_genre'] if user_row and user_row['favorite_genre'] else "Not specified"
+        badge_raw = user_row['badge'] if user_row and user_row['badge'] else "member"
+
+        c.execute("SELECT COUNT(*) FROM follows WHERE following_username=%s", (username,))
+        followers_count = c.fetchone()['count'] or 0
+
+        c.execute("SELECT COUNT(*) FROM follows WHERE follower_username=%s", (username,))
+        following_count = c.fetchone()['count'] or 0
+        c.close()
         conn.close()
 
         formatted_badges = format_badge_display(badge_raw, username)
@@ -821,6 +1104,10 @@ class UserProfileDialog(QDialog):
             f"<span style='background-color: #1e3a8a; color: #93c5fd; padding: 2px 8px; border-radius: 10px; font-size: 11px;'>{formatted_badges}</span>")
         user_info.addWidget(badge_lbl)
 
+        follows_info_lbl = QLabel(
+            f"<small style='color: #94a3b8; font-weight: bold;'><b>{followers_count}</b> Followers  |  <b>{following_count}</b> Following</small>")
+        user_info.addWidget(follows_info_lbl)
+
         status_lbl = QLabel(f"<small style='color: #3b82f6;'>● {status} — \"{status_msg}\"</small>")
         user_info.addWidget(status_lbl)
         header_layout.addLayout(user_info)
@@ -833,12 +1120,25 @@ class UserProfileDialog(QDialog):
                 "background-color: #2563eb; color: white; border-radius: 14px; padding: 6px 14px; font-weight: bold;")
             manage_profile_btn.clicked.connect(self.open_profile_editor)
             btn_container.addWidget(manage_profile_btn)
+
+            logout_btn = QPushButton("🚪 Logout")
+            logout_btn.setStyleSheet(
+                "background-color: #4b5563; color: white; border-radius: 14px; padding: 6px 14px; font-weight: bold;")
+            logout_btn.clicked.connect(self.handle_logout)
+            btn_container.addWidget(logout_btn)
+
+            delete_acc_btn = QPushButton("🗑️ Delete Account")
+            delete_acc_btn.setStyleSheet(
+                "background-color: #ef4444; color: white; border-radius: 14px; padding: 6px 14px; font-weight: bold;")
+            delete_acc_btn.clicked.connect(self.handle_delete_account)
+            btn_container.addWidget(delete_acc_btn)
         else:
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
-            c.execute("SELECT * FROM follows WHERE follower_username=? AND following_username=?",
+            c.execute("SELECT * FROM follows WHERE follower_username=%s AND following_username=%s",
                       (current_user, username))
             is_following = c.fetchone() is not None
+            c.close()
             conn.close()
 
             self.follow_btn = QPushButton("Unfollow" if is_following else "+ Follow")
@@ -871,34 +1171,35 @@ class UserProfileDialog(QDialog):
 
         layout.addWidget(QLabel("<b style='color: #b3b3b3; font-size: 13px;'>LISTENING & LIBRARY ANALYTICS</b>"))
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
         hist_res = c.fetchone()
-        unique_songs = hist_res[0] or 0
+        unique_songs = hist_res['count'] or 0
 
         c.execute(
-            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_song_res = c.fetchone()
-        fav_song = fav_song_res[0] if fav_song_res else "None"
+        fav_song = fav_song_res['title'] if fav_song_res else "None"
 
         c.execute(
             "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
         fav_art_res = c.fetchone()
-        fav_artist = fav_art_res[0] if fav_art_res else "None"
+        fav_artist = fav_art_res['artist'] if fav_art_res else "None"
 
-        c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
-        downloaded_count = c.fetchone()[0] or 0
+        c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+        downloaded_count = c.fetchone()['count'] or 0
 
         c.execute(
-            "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Upload%' OR source_tag LIKE '%Import%' OR source_tag LIKE '%Digital%'")
-        imported_count = c.fetchone()[0] or 0
+            "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+        imported_count = c.fetchone()['count'] or 0
 
         c.execute("SELECT COUNT(*) FROM favorites")
-        liked_count = c.fetchone()[0] or 0
+        liked_count = c.fetchone()['count'] or 0
 
         c.execute("SELECT COUNT(DISTINCT album) FROM songs")
-        total_albums = c.fetchone()[0] or 0
+        total_albums = c.fetchone()['count'] or 0
+        c.close()
         conn.close()
 
         scroll = QScrollArea()
@@ -937,7 +1238,8 @@ class UserProfileDialog(QDialog):
             return card
 
         cards_layout.addWidget(create_stat_card("🎧", "Unique Songs Listened", str(unique_songs)))
-        cards_layout.addWidget(create_stat_card("⬇️", "Online Songs Downloaded", f"{downloaded_count} Tracks", "#38bdf8"))
+        cards_layout.addWidget(
+            create_stat_card("⬇️", "Online Songs Downloaded", f"{downloaded_count} Tracks", "#38bdf8"))
         cards_layout.addWidget(create_stat_card("📁", "Local Songs Imported", f"{imported_count} Tracks", "#a78bfa"))
         cards_layout.addWidget(create_stat_card("🔥", "Favorite Song", fav_song, "#f59e0b"))
         cards_layout.addWidget(create_stat_card("🎤", "Favorite Artist", fav_artist, "#10b981"))
@@ -948,13 +1250,14 @@ class UserProfileDialog(QDialog):
         layout.addWidget(scroll)
 
     def load_avatar_image(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT profile_pic_path FROM users WHERE username=?", (self.username,))
+        c.execute("SELECT profile_pic_path FROM users WHERE username=%s", (self.username,))
         row = c.fetchone()
+        c.close()
         conn.close()
 
-        pfp_path = row[0] if row and row[0] else None
+        pfp_path = row['profile_pic_path'] if row and row['profile_pic_path'] else None
         if pfp_path and os.path.exists(pfp_path):
             pix = QPixmap(pfp_path)
             if not pix.isNull():
@@ -987,6 +1290,53 @@ class UserProfileDialog(QDialog):
         if editor.exec():
             self.load_avatar_image()
 
+    def handle_logout(self):
+        confirm = QMessageBox.question(self, "Logout", "Are you sure you want to log out?",
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm == QMessageBox.StandardButton.Yes:
+            if os.path.exists(SESSION_FILE):
+                try:
+                    os.remove(SESSION_FILE)
+                except Exception:
+                    pass
+            self.accept()
+            if self.parent() and hasattr(self.parent(), "logout_to_auth"):
+                self.parent().logout_to_auth()
+            else:
+                if isinstance(self.parent(), QMainWindow):
+                    self.parent().close()
+
+    def handle_delete_account(self):
+        if self.username.lower() == OWNER_USERNAME.lower():
+            QMessageBox.warning(self, "Action Denied", "The owner account cannot be deleted.")
+            return
+
+        confirm = QMessageBox.question(
+            self, "Delete Account",
+            f"Are you absolutely sure you want to delete account '{self.username}'? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            try:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("DELETE FROM users WHERE username=%s", (self.username,))
+                c.execute("DELETE FROM follows WHERE follower_username=%s OR following_username=%s",
+                          (self.username, self.username))
+                conn.commit()
+                c.close()
+                conn.close()
+
+                if os.path.exists(SESSION_FILE):
+                    os.remove(SESSION_FILE)
+
+                QMessageBox.information(self, "Account Deleted", "Your account has been deleted successfully.")
+                self.accept()
+                if isinstance(self.parent(), QMainWindow):
+                    self.parent().close()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete account: {str(e)}")
+
     def upload_custom_pfp(self):
         if self.current_user != self.username:
             return
@@ -1014,10 +1364,11 @@ class UserProfileDialog(QDialog):
                 dest_path = os.path.join(pfp_dir, f"{self.username}_pfp.png")
                 square_pix.save(dest_path, "PNG")
 
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("UPDATE users SET profile_pic_path=? WHERE username=?", (dest_path, self.username))
+                c.execute("UPDATE users SET profile_pic_path=%s WHERE username=%s", (dest_path, self.username))
                 conn.commit()
+                c.close()
                 conn.close()
 
                 self.load_avatar_image()
@@ -1030,11 +1381,11 @@ class UserProfileDialog(QDialog):
             QMessageBox.warning(self, "Access Denied", f"Only the owner ({OWNER_USERNAME}) can assign tester badges.")
             return
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT badge FROM users WHERE username=?", (self.username,))
+        c.execute("SELECT badge FROM users WHERE username=%s", (self.username,))
         row = c.fetchone()
-        badges_str = row[0] if row and row[0] else ""
+        badges_str = row['badge'] if row and row['badge'] else ""
         badges_list = [b.strip().lower() for b in badges_str.split(",") if b.strip()]
 
         if "tester" in badges_list:
@@ -1045,30 +1396,35 @@ class UserProfileDialog(QDialog):
             msg = f"Granted Tester badge to {self.username}!"
 
         new_str = ", ".join(badges_list)
-        c.execute("UPDATE users SET badge=? WHERE username=?", (new_str, self.username))
+        c.execute("UPDATE users SET badge=%s WHERE username=%s", (new_str, self.username))
         conn.commit()
+        c.close()
         conn.close()
         QMessageBox.information(self, "Owner Action", msg)
 
     def toggle_follow(self):
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT * FROM follows WHERE follower_username=? AND following_username=?",
+        c.execute("SELECT * FROM follows WHERE follower_username=%s AND following_username=%s",
                   (self.current_user, self.username))
         if c.fetchone():
-            c.execute("DELETE FROM follows WHERE follower_username=? AND following_username=?",
+            c.execute("DELETE FROM follows WHERE follower_username=%s AND following_username=%s",
                       (self.current_user, self.username))
             self.follow_btn.setText("+ Follow")
             self.follow_btn.setStyleSheet(
                 "QPushButton { background-color: #3b82f6; color: white; border-radius: 14px; padding: 6px 16px; font-weight: bold; }")
         else:
-            c.execute("INSERT INTO follows (follower_username, following_username) VALUES (?, ?)",
+            c.execute("INSERT INTO follows (follower_username, following_username) VALUES (%s, %s)",
                       (self.current_user, self.username))
             self.follow_btn.setText("Unfollow")
             self.follow_btn.setStyleSheet(
                 "QPushButton { background-color: #ef4444; color: white; border-radius: 14px; padding: 6px 16px; font-weight: bold; }")
         conn.commit()
+        c.close()
         conn.close()
+
+        if self.parent_app and hasattr(self.parent_app, "load_social_users"):
+            self.parent_app.load_social_users()
 
 
 class MusicVisualizerWidget(QWidget):
@@ -1111,157 +1467,6 @@ class MusicVisualizerWidget(QWidget):
             painter.drawRoundedRect(int(rect_x + 1), int(rect_y), int(w - 2), int(bar_h), 3, 3)
 
 
-class SongItemWidget(QWidget):
-    def __init__(self, song_id, title, artist, album, theme, tag, parent_app, in_playlist=False):
-        super().__init__()
-        self.song_id = song_id
-        self.title, self.artist, self.album, self.theme, self.tag = title, artist, album, theme, tag
-        self.parent_app = parent_app
-        self.in_playlist = in_playlist
-
-        self.setStyleSheet("QWidget { background: transparent; } SongItemWidget { border-bottom: 1px solid #222; }")
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
-
-        self.text_label = QLabel(
-            f"♪  <b>{title}</b> — {artist}  <small style='color: #888;'>[{album} | {theme} | {tag}]</small>")
-        self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        layout.addWidget(self.text_label)
-
-        edit_btn = QPushButton("✏️")
-        edit_btn.setFixedSize(28, 28)
-        edit_btn.setToolTip("Edit Song Tags & Info")
-        edit_btn.clicked.connect(self.edit_song_metadata)
-        layout.addWidget(edit_btn)
-
-        del_song_btn = QPushButton("🗑️")
-        del_song_btn.setFixedSize(28, 28)
-        del_song_btn.setToolTip("Delete Song Permanently")
-        del_song_btn.setStyleSheet("background-color: #ef4444; color: white;")
-        del_song_btn.clicked.connect(self.delete_song_permanently)
-        layout.addWidget(del_song_btn)
-
-        if self.in_playlist:
-            remove_btn = QPushButton("❌ Remove")
-            remove_btn.setFixedSize(85, 26)
-            remove_btn.setStyleSheet("background-color: #ef4444; color: white; border-radius: 13px; font-size: 11px;")
-            remove_btn.clicked.connect(self.remove_from_current_playlist)
-            layout.addWidget(remove_btn)
-
-        add_btn = QPushButton("➕")
-        add_btn.setFixedSize(28, 28)
-        add_btn.setStyleSheet("background-color: #3b82f6; color: white; border-radius: 14px; font-weight: bold;")
-        add_btn.clicked.connect(self.show_playlist_menu)
-        layout.addWidget(add_btn)
-
-    def delete_song_permanently(self):
-        confirm = QMessageBox.question(self, "Delete Song", f"Permanently delete '{self.title}' from library and disk?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if confirm == QMessageBox.StandardButton.Yes:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT file_path FROM songs WHERE id=?", (self.song_id,))
-            row = c.fetchone()
-            if row and row[0] and os.path.exists(row[0]):
-                try:
-                    os.remove(row[0])
-                except Exception:
-                    pass
-            c.execute("DELETE FROM songs WHERE id=?", (self.song_id,))
-            c.execute("DELETE FROM playlist_songs WHERE song_id=?", (self.song_id,))
-            c.execute("DELETE FROM favorites WHERE song_id=?", (self.song_id,))
-            conn.commit()
-            conn.close()
-            self.parent_app.load_songs_to_ui()
-
-    def edit_song_metadata(self):
-        d = QDialog(self)
-        d.setWindowTitle("Edit Song Details")
-        d.setFixedSize(320, 260)
-        if os.path.exists(LOGO_FILE):
-            d.setWindowIcon(QIcon(LOGO_FILE))
-        v = QVBoxLayout(d)
-
-        t_in = QLineEdit(self.title)
-        a_in = QLineEdit(self.artist)
-        alb_in = QLineEdit(self.album)
-        th_in = QLineEdit(self.theme)
-        tag_in = QLineEdit(self.tag)
-
-        v.addWidget(QLabel("Title:"))
-        v.addWidget(t_in)
-        v.addWidget(QLabel("Artist:"))
-        v.addWidget(a_in)
-        v.addWidget(QLabel("Album:"))
-        v.addWidget(alb_in)
-        v.addWidget(QLabel("Theme/Genre:"))
-        v.addWidget(th_in)
-        v.addWidget(QLabel("Source Tag:"))
-        v.addWidget(tag_in)
-
-        save = QPushButton("Save Tags")
-        v.addWidget(save)
-
-        def do_save():
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("UPDATE songs SET title=?, artist=?, album=?, theme=?, source_tag=? WHERE id=?",
-                      (t_in.text(), a_in.text(), alb_in.text(), th_in.text(), tag_in.text(), self.song_id))
-            conn.commit()
-            conn.close()
-            d.accept()
-            self.parent_app.load_songs_to_ui()
-
-        save.clicked.connect(do_save)
-        d.exec()
-
-    def remove_from_current_playlist(self):
-        if self.parent_app.current_playlist_id:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ?",
-                           (self.parent_app.current_playlist_id, self.song_id))
-            conn.commit()
-            conn.close()
-            self.parent_app.load_songs_to_ui()
-
-    def show_playlist_menu(self):
-        menu = QMenu(self)
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name FROM playlists")
-        playlists = cursor.fetchall()
-        cursor.execute("SELECT playlist_id FROM playlist_songs WHERE song_id = ?", (self.song_id,))
-        active_playlists = {row[0] for row in cursor.fetchall()}
-        conn.close()
-
-        if not playlists:
-            no_act = menu.addAction("No Playlists Available")
-            no_act.setEnabled(False)
-        else:
-            for p_id, p_name in playlists:
-                is_in = p_id in active_playlists
-                label = f"✅ {p_name}" if is_in else f"➕ {p_name}"
-                action = menu.addAction(label)
-                action.triggered.connect(lambda checked, pid=p_id, in_p=is_in: self.toggle_playlist(pid, in_p))
-        menu.exec(self.cursor().pos())
-
-    def toggle_playlist(self, playlist_id, is_in):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        if is_in:
-            cursor.execute("DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ?",
-                           (playlist_id, self.song_id))
-        else:
-            cursor.execute("INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id) VALUES (?, ?)",
-                           (playlist_id, self.song_id))
-        conn.commit()
-        conn.close()
-        self.parent_app.load_songs_to_ui()
-
-
 class CoverCardWidget(QFrame):
     def __init__(self, album, artist, year, theme, art_path, count, parent_app):
         super().__init__()
@@ -1290,7 +1495,7 @@ class CoverCardWidget(QFrame):
         v.addWidget(img_lbl)
         v.addWidget(QLabel(f"<b>{album}</b>"))
         v.addWidget(QLabel(f"<small>{artist} ({year})</small>"))
-        v.addWidget(QLabel(f"<small style='color: #3b82f6;'>{count} Tracks | {theme}</small>"))
+        v.addWidget(QLabel(f"<small style='color: #3b82f6;'>{count} Tracks</small>"))
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1312,18 +1517,21 @@ class SpotifyUniqueApp(QMainWindow):
         self.is_shuffling = False
         self.current_song_id = None
         self.last_tracked_position = 0
+        self.accumulated_play_time = 0
         self.global_search_results = []
         self.current_view_mode = "All Songs"
         self.current_playlist_id = None
         self.synced_lyrics_lines = []
+        self.currently_playing_string = "Not playing anything"
 
         if self.current_user.lower() == OWNER_USERNAME.lower():
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
             c.execute(
-                "UPDATE users SET badge = CASE WHEN badge NOT LIKE '%owner%' THEN badge || ', owner' ELSE badge END WHERE username=?",
+                "UPDATE users SET badge = CASE WHEN badge IS NULL OR badge = '' THEN 'owner' WHEN badge NOT LIKE '%%owner%%' THEN badge || ', owner' ELSE badge END WHERE username=%s",
                 (self.current_user,))
             conn.commit()
+            c.close()
             conn.close()
 
         self.player = QMediaPlayer()
@@ -1340,7 +1548,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.layout = QVBoxLayout(self.main_widget)
         self.layout.setContentsMargins(12, 12, 12, 12)
 
-        self.setStyleSheet(THEMES["Dark Mode"])
+        self.setStyleSheet(THEMES["Spotify Dark"])
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("<b>Theme:</b>"))
@@ -1355,22 +1563,23 @@ class SpotifyUniqueApp(QMainWindow):
 
         top_bar.addStretch()
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, badge FROM users WHERE username=?", (self.current_user,))
+        c.execute("SELECT id, badge FROM users WHERE username=%s", (self.current_user,))
         u_row = c.fetchone()
-        u_id = u_row[0] if u_row else 1
-        u_badge_raw = u_row[1] if u_row and u_row[1] else "member"
+        u_id = u_row['id'] if u_row else 1
+        u_badge_raw = u_row['badge'] if u_row and u_row['badge'] else "member"
+        c.close()
         conn.close()
 
         formatted_top_badge = format_badge_display(u_badge_raw, self.current_user)
 
-        top_bar.addWidget(QLabel(
-            f"👤 <b>{self.current_user}</b> <span style='color: #3b82f6;'>#{u_id}</span> <span style='color: #93c5fd;'>[{formatted_top_badge}]</span>"))
-
-        logout_btn = QPushButton("Switch Account")
-        logout_btn.clicked.connect(self.switch_account)
-        top_bar.addWidget(logout_btn)
+        self.profile_top_btn = QPushButton(f"👤 {self.current_user} #{u_id} [{formatted_top_badge}]")
+        self.profile_top_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.profile_top_btn.setStyleSheet(
+            "QPushButton { background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; border-radius: 12px; padding: 4px 12px; font-weight: bold; } QPushButton:hover { background-color: #0284c7; color: white; }")
+        self.profile_top_btn.clicked.connect(self.open_current_user_profile)
+        top_bar.addWidget(self.profile_top_btn)
 
         self.layout.addLayout(top_bar)
 
@@ -1389,18 +1598,62 @@ class SpotifyUniqueApp(QMainWindow):
         self.init_player_bar()
 
         self.load_songs_to_ui()
-        self.update_stats_display()
 
         self.init_system_tray()
 
+        self.restore_playback_state()
+
         self.stats_timer = QTimer(self)
-        self.stats_timer.timeout.connect(self.update_stats_display)
-        self.stats_timer.start(1000)
+        self.stats_timer.timeout.connect(self.update_stats_display_lazy)
+        self.stats_timer.start(5000)
 
         self.heartbeat_timer = QTimer(self)
         self.heartbeat_timer.timeout.connect(self.update_presence_heartbeat)
         self.heartbeat_timer.start(5000)
         self.update_presence_heartbeat()
+
+    def restore_playback_state(self):
+        state_file = "playback_state.json"
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r") as f:
+                    data = json.load(f)
+                    song_id = data.get("song_id")
+                    position_ms = data.get("position_ms", 0)
+                    volume = data.get("volume", 0.7)
+
+                    self.audio_output.setVolume(volume)
+                    if hasattr(self, 'volume_slider'):
+                        self.volume_slider.setValue(int(volume * 100))
+
+                    if song_id:
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        c.execute("SELECT id FROM songs WHERE id = %s", (song_id,))
+                        if c.fetchone():
+                            self.play_song_by_id(song_id, start_position=position_ms, auto_play=False)
+                        c.close()
+                        conn.close()
+            except Exception:
+                pass
+
+    def save_playback_state(self):
+        state_file = "playback_state.json"
+        try:
+            data = {
+                "song_id": self.current_song_id,
+                "position_ms": self.player.position(),
+                "volume": self.audio_output.volume()
+            }
+            with open(state_file, "w") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    def open_current_user_profile(self):
+        dlg = UserProfileDialog(self.current_user, self.current_user, self)
+        dlg.exec()
+        self.load_social_users_async()
 
     def init_system_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -1440,18 +1693,14 @@ class SpotifyUniqueApp(QMainWindow):
                 self.activateWindow()
 
     def closeEvent(self, event):
-        event.ignore()
-        self.hide()
-        if hasattr(self, 'tray_icon'):
-            self.tray_icon.showMessage(
-                "Music App",
-                "App is running in the background tray. Click tray icon to restore.",
-                QSystemTrayIcon.MessageIcon.Information,
-                2000
-            )
+        self.flush_listening_history()
+        self.save_playback_state()
+        event.accept()
 
     def really_quit(self):
-        for worker_attr in ['search_worker', 'download_worker']:
+        self.flush_listening_history()
+        self.save_playback_state()
+        for worker_attr in ['search_worker', 'download_worker', 'bg_worker']:
             if hasattr(self, worker_attr):
                 worker = getattr(self, worker_attr)
                 if worker and worker.isRunning():
@@ -1474,14 +1723,6 @@ class SpotifyUniqueApp(QMainWindow):
     def open_theme_studio(self):
         dlg = ThemeStudioDialog(self)
         dlg.exec()
-
-    def switch_account(self):
-        if os.path.exists(SESSION_FILE):
-            try:
-                os.remove(SESSION_FILE)
-            except Exception:
-                pass
-        self.close()
 
     def init_home_tab(self):
         home_widget = QWidget()
@@ -1573,11 +1814,89 @@ class SpotifyUniqueApp(QMainWindow):
         right_layout.addWidget(self.local_search_input)
 
         self.song_list_widget = QListWidget()
+        self.song_list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.song_list_widget.customContextMenuRequested.connect(self.show_song_context_menu)
         self.song_list_widget.itemDoubleClicked.connect(self.play_selected_song_from_item)
         right_layout.addWidget(self.song_list_widget)
 
         layout.addWidget(right_content)
         self.tabs.addTab(home_widget, "🏠 Home & Library")
+
+    def show_song_context_menu(self, pos):
+        item = self.song_list_widget.itemAt(pos)
+        if not item:
+            return
+        song_id = item.data(Qt.ItemDataRole.UserRole)
+
+        menu = QMenu(self)
+
+        # Playlist Submenu
+        playlist_menu = menu.addMenu("📁 Add to Playlist")
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, name FROM playlists")
+        playlists = c.fetchall()
+        c.close()
+        conn.close()
+
+        if playlists:
+            for pl in playlists:
+                pl_id = pl['id']
+                pl_name = pl['name']
+                action = playlist_menu.addAction(pl_name)
+                action.triggered.connect(
+                    lambda checked, s_id=song_id, p_id=pl_id: self.add_song_to_playlist(s_id, p_id))
+        else:
+            no_pl = playlist_menu.addAction("No playlists found")
+            no_pl.setEnabled(False)
+
+        menu.addSeparator()
+        edit_action = menu.addAction("✏️ Edit Song Details & Cover Photo")
+        del_action = menu.addAction("🗑️ Delete Permanently")
+
+        action = menu.exec(self.song_list_widget.mapToGlobal(pos))
+        if action == edit_action:
+            dlg = SongEditorDialog(song_id, self)
+            if dlg.exec():
+                self.load_songs_to_ui()
+        elif action == del_action:
+            confirm = QMessageBox.question(self, "Delete Song", "Permanently delete this song from library and disk?",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirm == QMessageBox.StandardButton.Yes:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT file_path FROM songs WHERE id=%s", (song_id,))
+                row = c.fetchone()
+                if row and row['file_path'] and os.path.exists(row['file_path']):
+                    try:
+                        os.remove(row['file_path'])
+                    except Exception:
+                        pass
+                c.execute("DELETE FROM songs WHERE id=%s", (song_id,))
+                c.execute("DELETE FROM playlist_songs WHERE song_id=%s", (song_id,))
+                c.execute("DELETE FROM favorites WHERE song_id=%s", (song_id,))
+                conn.commit()
+                c.close()
+                conn.close()
+                self.load_songs_to_ui()
+
+    def add_song_to_playlist(self, song_id, playlist_id):
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO playlist_songs (playlist_id, song_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (playlist_id, song_id)
+            )
+            conn.commit()
+            c.close()
+            conn.close()
+            QMessageBox.information(self, "Success", "Song added to playlist successfully!")
+
+            if self.current_view_mode == "Playlist" and self.current_playlist_id == playlist_id:
+                self.load_songs_to_ui()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add song to playlist: {str(e)}")
 
     def open_playlist_manager(self):
         dlg = PlaylistManagerDialog(self)
@@ -1631,13 +1950,15 @@ class SpotifyUniqueApp(QMainWindow):
         layout.setSpacing(20)
 
         layout.addWidget(QLabel("<h2>🎛️ Audio Mixer & Equalizer</h2>"))
-        layout.addWidget(QLabel("<small>Fine-tune audio properties for the currently playing song in real time (0% to 100%).</small>"))
+        layout.addWidget(QLabel(
+            "<small>Fine-tune audio properties for the currently playing song in real time (0% to 100%).</small>"))
 
         cards_layout = QHBoxLayout()
 
         def create_mixer_slider(title, default_val=100):
             frame = QFrame()
-            frame.setStyleSheet("background-color: #181818; border-radius: 12px; border: 1px solid #333; padding: 15px;")
+            frame.setStyleSheet(
+                "background-color: #181818; border-radius: 12px; border: 1px solid #333; padding: 15px;")
             v = QVBoxLayout(frame)
             v.addWidget(QLabel(f"<b>{title}</b>", alignment=Qt.AlignmentFlag.AlignCenter))
 
@@ -1653,6 +1974,7 @@ class SpotifyUniqueApp(QMainWindow):
 
             def on_val_change(val):
                 lbl.setText(f"{val}%")
+
             slider.valueChanged.connect(on_val_change)
             return frame, slider
 
@@ -1668,7 +1990,6 @@ class SpotifyUniqueApp(QMainWindow):
 
         layout.addLayout(cards_layout)
 
-        # Connect mixer sliders to active audio processing/scaling behavior allowing true 0% mute to 100% full intensity
         self.bass_slider.valueChanged.connect(self.apply_mixer_effects)
         self.mid_slider.valueChanged.connect(self.apply_mixer_effects)
         self.treble_slider.valueChanged.connect(self.apply_mixer_effects)
@@ -1677,7 +1998,6 @@ class SpotifyUniqueApp(QMainWindow):
         self.tabs.addTab(mixer_widget, "🎛️ Mixer")
 
     def apply_mixer_effects(self):
-        """Applies real-time audio adjustments from the Mixer sliders (Bass, Mid, Treble, Gain) to the current playback stream."""
         if not self.player.isPlaying():
             return
 
@@ -1686,7 +2006,6 @@ class SpotifyUniqueApp(QMainWindow):
         treble_val = self.treble_slider.value() / 100.0
         gain_val = self.gain_slider.value() / 100.0
 
-        # Calculate combined real-time audio profile modifier (0% completely mutes output, 100% preserves/enhances full spectrum)
         spectrum_multiplier = (bass_val * 0.3) + (mid_val * 0.3) + (treble_val * 0.4)
         effective_volume = min(1.0, max(0.0, gain_val * spectrum_multiplier))
 
@@ -1710,65 +2029,76 @@ class SpotifyUniqueApp(QMainWindow):
         layout.setContentsMargins(15, 15, 15, 15)
         layout.addWidget(QLabel("<h3>🌍 App Users & Friends Network</h3>"))
         layout.addWidget(
-            QLabel("<small>Click on any user below to view their profile, stats, circular avatar, iconized badges, and follow them!</small>"))
+            QLabel(
+                "<small>Click on any user below to view their profile, follower counts, and what they are currently listening to!</small>"))
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("<b>Filter View:</b>"))
+        self.social_filter_combo = QComboBox()
+        self.social_filter_combo.addItems(["All Users", "Users You Follow"])
+        self.social_filter_combo.currentTextChanged.connect(lambda: self.load_social_users_async())
+        filter_row.addWidget(self.social_filter_combo)
+        filter_row.addStretch()
+
+        refresh_social_btn = QPushButton("Refresh Users List")
+        refresh_social_btn.clicked.connect(self.load_social_users_async)
+        filter_row.addWidget(refresh_social_btn)
+        layout.addLayout(filter_row)
 
         self.social_user_list_widget = QListWidget()
         self.social_user_list_widget.itemDoubleClicked.connect(self.view_user_profile)
         layout.addWidget(self.social_user_list_widget)
 
-        refresh_social_btn = QPushButton("Refresh Users List")
-        refresh_social_btn.clicked.connect(self.load_social_users)
-        layout.addWidget(refresh_social_btn)
-
         self.tabs.addTab(social_widget, "👥 Social")
 
-    def load_social_users(self):
+    def load_social_users_async(self):
+        filter_mode = self.social_filter_combo.currentText() if hasattr(self, 'social_filter_combo') else "All Users"
+        self.bg_worker = BackgroundFetchWorker("social", filter_mode)
+        self.bg_worker.parent_username = self.current_user
+        self.bg_worker.data_ready.connect(self.populate_social_ui)
+        self.bg_worker.start()
+
+    def populate_social_ui(self, users):
         self.social_user_list_widget.clear()
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT id, username, status, last_seen, status_message, badge FROM users")
-            users = c.fetchall()
+        now = datetime.datetime.now()
+        for row in users:
+            if not row or not row['username']:
+                continue
+            uid = row['id']
+            u = row['username']
+            stat = row['status'] if row['status'] else "Active"
+            last_seen_raw = row['last_seen']
+            status_msg = row['status_message'] if row['status_message'] else "No status message"
+            badge_raw = row['badge'] if row['badge'] else "member"
+            followers_count = row.get('followers', 0)
+            following_count = row.get('following', 0)
 
-            now = datetime.datetime.now()
+            formatted_badge = format_badge_display(badge_raw, u)
 
-            for row in users:
-                if not row or len(row) < 2 or not row[1]:
-                    continue
-                uid = row[0]
-                u = row[1]
-                stat = row[2] if len(row) > 2 and row[2] else "Active"
-                last_seen_str = row[3] if len(row) > 3 else None
-                status_msg = row[4] if len(row) > 4 and row[4] else "No status message"
-                badge_raw = row[5] if len(row) > 5 and row[5] else "member"
+            dot = "⚫"
+            if last_seen_raw:
+                try:
+                    if isinstance(last_seen_raw, datetime.datetime):
+                        last_seen_time = last_seen_raw
+                    else:
+                        last_seen_time = datetime.datetime.fromisoformat(str(last_seen_raw))
 
-                formatted_badge = format_badge_display(badge_raw, u)
+                    diff_seconds = (now - last_seen_time).total_seconds()
+                    if diff_seconds < 15:
+                        dot = "🟡" if stat == "Minimized" else "🟢"
+                    elif diff_seconds < 45:
+                        dot = "🟡"
+                except Exception:
+                    pass
 
-                dot = "⚫"
-                if last_seen_str:
-                    try:
-                        last_seen_time = datetime.datetime.fromisoformat(last_seen_str)
-                        diff_seconds = (now - last_seen_time).total_seconds()
-                        if diff_seconds < 15:
-                            dot = "🟡" if stat == "Minimized" else "🟢"
-                        elif diff_seconds < 120:
-                            dot = "🟡"
-                    except Exception:
-                        pass
+            follow_badge = ""
+            if u.lower() == self.current_user.lower():
+                follow_badge = " [You]"
 
-                c.execute("SELECT * FROM follows WHERE follower_username=? AND following_username=?",
-                          (self.current_user, u))
-                is_f = c.fetchone() is not None
-                follow_badge = " [Following]" if is_f else ""
-                if u.lower() == self.current_user.lower():
-                    follow_badge = " [You]"
-
-                item = QListWidgetItem(f"{dot}  👤 {u} (#{uid}) [{formatted_badge}]{follow_badge} — \"{status_msg}\"")
-                item.setData(Qt.ItemDataRole.UserRole, u)
-                self.social_user_list_widget.addItem(item)
-            conn.close()
-        except Exception:
-            pass
+            item = QListWidgetItem(
+                f"{dot}  👤 {u} (#{uid}) [{formatted_badge}]{follow_badge} — 👥 {followers_count} Followers, {following_count} Following\n   └─ 🎵 {status_msg}")
+            item.setData(Qt.ItemDataRole.UserRole, u)
+            self.social_user_list_widget.addItem(item)
 
     def view_user_profile(self, item):
         if not item: return
@@ -1776,7 +2106,7 @@ class SpotifyUniqueApp(QMainWindow):
         if target_user:
             dlg = UserProfileDialog(target_user, self.current_user, self)
             dlg.exec()
-            self.load_social_users()
+            self.load_social_users_async()
 
     def init_lyrics_tab(self):
         lyrics_widget = QWidget()
@@ -1837,35 +2167,49 @@ class SpotifyUniqueApp(QMainWindow):
         top_row.addStretch()
 
         controls = QHBoxLayout()
+
+        # Fixed control buttons with zero padding and explicit sizing to eliminate visual clipping
         self.shuffle_btn = QPushButton("🔀")
-        self.shuffle_btn.setFixedSize(40, 36)
+        self.shuffle_btn.setFixedSize(38, 38)
+        self.shuffle_btn.setStyleSheet(
+            "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
         self.shuffle_btn.setToolTip("Toggle Shuffle")
         self.shuffle_btn.clicked.connect(self.toggle_shuffle)
         controls.addWidget(self.shuffle_btn)
 
         self.prev_btn = QPushButton("⏮")
-        self.prev_btn.setFixedSize(40, 36)
+        self.prev_btn.setFixedSize(38, 38)
+        self.prev_btn.setStyleSheet(
+            "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
         self.prev_btn.clicked.connect(self.prev_song)
         controls.addWidget(self.prev_btn)
 
         self.play_btn = QPushButton("▶")
-        self.play_btn.setFixedSize(45, 36)
+        self.play_btn.setFixedSize(42, 42)
+        self.play_btn.setStyleSheet(
+            "background-color: #3b82f6; color: white; border-radius: 21px; padding: 0px; font-size: 16px; border: none;")
         self.play_btn.clicked.connect(self.toggle_playback)
         controls.addWidget(self.play_btn)
 
         self.next_btn = QPushButton("⏭")
-        self.next_btn.setFixedSize(40, 36)
+        self.next_btn.setFixedSize(38, 38)
+        self.next_btn.setStyleSheet(
+            "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
         self.next_btn.clicked.connect(self.next_song)
         controls.addWidget(self.next_btn)
 
         self.loop_btn = QPushButton("🔁")
-        self.loop_btn.setFixedSize(45, 36)
+        self.loop_btn.setFixedSize(38, 38)
+        self.loop_btn.setStyleSheet(
+            "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
         self.loop_btn.setToolTip("Toggle Loop")
         self.loop_btn.clicked.connect(self.toggle_loop)
         controls.addWidget(self.loop_btn)
 
         self.fav_player_btn = QPushButton("❤️")
-        self.fav_player_btn.setFixedSize(40, 36)
+        self.fav_player_btn.setFixedSize(38, 38)
+        self.fav_player_btn.setStyleSheet(
+            "background-color: #222222; color: #FFFFFF; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
         self.fav_player_btn.setToolTip("Like / Favorite Current Song")
         self.fav_player_btn.clicked.connect(self.toggle_favorite_current_song)
         controls.addWidget(self.fav_player_btn)
@@ -1899,7 +2243,7 @@ class SpotifyUniqueApp(QMainWindow):
         slider_layout.addWidget(self.time_total_label)
 
         self.upcoming_label = QLabel("Next: None")
-        self.upcoming_label.setStyleSheet("color: #3b82f6; font-size: 11px;")
+        self.upcoming_label.setStyleSheet("color: #38bdf8; font-size: 11px;")
         slider_layout.addWidget(self.upcoming_label)
 
         main_bar_layout.addLayout(slider_layout)
@@ -1908,32 +2252,32 @@ class SpotifyUniqueApp(QMainWindow):
     def on_tab_changed(self, index):
         tab_name = self.tabs.tabText(index)
         if "Stats" in tab_name:
-            self.update_stats_display()
+            self.update_stats_display_lazy()
         elif "Cover Flow" in tab_name:
-            self.render_cover_flow()
+            self.load_cover_flow_async()
         elif "Social" in tab_name:
-            self.load_social_users()
+            self.load_social_users_async()
 
-    def render_cover_flow(self):
+    def load_cover_flow_async(self):
+        self.bg_worker = BackgroundFetchWorker("albums")
+        self.bg_worker.data_ready.connect(self.populate_cover_flow)
+        self.bg_worker.start()
+
+    def populate_cover_flow(self, albums):
         for i in reversed(range(self.cover_layout.count())):
             w = self.cover_layout.itemAt(i).widget()
             if w: w.setParent(None)
 
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT album, artist, year, theme, album_art_path, COUNT(*) FROM songs GROUP BY album")
-        albums = cursor.fetchall()
-        conn.close()
-
-        for alb, art, yr, thm, art_p, cnt in albums:
-            card = CoverCardWidget(alb or "Unknown", art or "Unknown Artist", yr or "2026", thm or "Default", art_p,
-                                   cnt, self)
+        for row in albums:
+            card = CoverCardWidget(row['album'] or "Unknown", row['artist'] or "Unknown Artist", row['year'] or "2026",
+                                   row['theme'] or "Default", row['album_art_path'],
+                                   row['count'], self)
             self.cover_layout.addWidget(card)
 
     def filter_view_by_album(self, album_name):
         self.tabs.setCurrentIndex(0)
         self.current_view_mode = "Album"
-        self.view_title_label.setText(f"<b style='color: #3b82f6;'>ALBUM: {album_name.upper()}</b>")
+        self.view_title_label.setText(f"<b style='color: #38bdf8;'>ALBUM: {album_name.upper()}</b>")
         self.load_songs_to_ui(album_filter=album_name)
 
     def import_audio_files(self):
@@ -1960,7 +2304,7 @@ class SpotifyUniqueApp(QMainWindow):
                         if file.lower().endswith(ALLOWED_EXTENSIONS):
                             audio_files.append(os.path.join(root, file))
 
-                conn = sqlite3.connect(DB_PATH)
+                conn = get_db_connection()
                 cursor = conn.cursor()
                 for f_path in audio_files:
                     filename = os.path.basename(f_path)
@@ -1973,17 +2317,18 @@ class SpotifyUniqueApp(QMainWindow):
 
                     cursor.execute(
                         """INSERT INTO songs (title, artist, album, year, theme, source_tag, duration, file_path)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         (title, art_name or "Unknown Artist", alb_name, yr_name or "2026", thm_name or "Custom",
                          tag_name or "Upload", dur, dest))
                 conn.commit()
+                cursor.close()
                 conn.close()
                 self.load_songs_to_ui()
                 QMessageBox.information(self, "Album Uploaded",
                                         f"Uploaded album '{alb_name}' with {len(audio_files)} tracks!")
 
     def process_import_files(self, file_paths):
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
         added = 0
         for path in file_paths:
@@ -1995,17 +2340,32 @@ class SpotifyUniqueApp(QMainWindow):
                 audio = File(dest, easy=True)
                 dur = int(audio.info.length) if audio and hasattr(audio, 'info') else 0
 
-                cursor.execute("SELECT id FROM songs WHERE file_path = ?", (dest,))
+                cursor.execute("SELECT id FROM songs WHERE file_path = %s", (dest,))
                 if not cursor.fetchone():
                     cursor.execute(
                         """INSERT INTO songs (title, artist, album, year, theme, source_tag, duration, file_path)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                         (title, artist, album, year, theme, tag, dur, dest))
                     added += 1
         conn.commit()
+        cursor.close()
         conn.close()
         self.load_songs_to_ui()
         QMessageBox.information(self, "Import Complete", f"Successfully imported {added} audio tracks!")
+
+    def flush_listening_history(self):
+        if self.current_song_id and self.accumulated_play_time > 0:
+            try:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("INSERT INTO listening_history (song_id, duration_played) VALUES (%s, %s)",
+                          (self.current_song_id, self.accumulated_play_time))
+                conn.commit()
+                c.close()
+                conn.close()
+            except Exception:
+                pass
+            self.accumulated_play_time = 0
 
     def position_changed(self, position):
         if not self.seek_slider.isSliderDown():
@@ -2023,7 +2383,7 @@ class SpotifyUniqueApp(QMainWindow):
                     break
             if active_lyric:
                 block = "<br>".join([
-                    f"<span style='color: #3b82f6; font-weight: bold; font-size: 15px;'>➔ {t}</span>" if t == active_lyric
+                    f"<span style='color: #38bdf8; font-weight: bold; font-size: 15px;'>➔ {t}</span>" if t == active_lyric
                     else f"<span style='color: #b3b3b3; font-size: 13px;'>{t}</span>"
                     for _, t in self.synced_lyrics_lines
                 ])
@@ -2031,13 +2391,10 @@ class SpotifyUniqueApp(QMainWindow):
 
         if self.current_song_id and self.player.isPlaying():
             delta = position - self.last_tracked_position
-            if 0 < delta < 2000:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("INSERT INTO listening_history (song_id, duration_played) VALUES (?, ?)",
-                          (self.current_song_id, int(delta / 1000)))
-                conn.commit()
-                conn.close()
+            if 0 < delta < 3000:
+                self.accumulated_play_time += int(delta / 1000)
+                if self.accumulated_play_time >= 10:
+                    self.flush_listening_history()
             self.last_tracked_position = position
 
     def fetch_lyrics_from_lrclib(self, title, artist, duration):
@@ -2072,34 +2429,51 @@ class SpotifyUniqueApp(QMainWindow):
         return sorted(parsed, key=lambda x: x[0])
 
     def play_selected_song_from_item(self, item):
-        widget = self.song_list_widget.itemWidget(item)
-        if widget: self.play_song_by_id(widget.song_id)
+        song_id = item.data(Qt.ItemDataRole.UserRole)
+        if song_id:
+            self.play_song_by_id(song_id)
 
-    def play_song_by_id(self, song_id):
-        conn = sqlite3.connect(DB_PATH)
+    def play_song_by_id(self, song_id, start_position=0, auto_play=True):
+        self.flush_listening_history()
+
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT title, artist, album, duration, lyrics, album_art_path, file_path FROM songs WHERE id = ?",
+            "SELECT title, artist, album, duration, lyrics, album_art_path, file_path FROM songs WHERE id = %s",
             (song_id,))
         song = cursor.fetchone()
 
         if song:
-            title, artist, album, duration, cached_lyrics, art_path, path = song
+            title, artist, album, duration, cached_lyrics, art_path, path = song['title'], song['artist'], song[
+                'album'], song['duration'], song['lyrics'], song['album_art_path'], song['file_path']
             self.current_song_id = song_id
-            self.last_tracked_position = 0
+            self.last_tracked_position = start_position
+            self.accumulated_play_time = 0
             self.synced_lyrics_lines = []
+            self.currently_playing_string = f"{artist} - {title}"
 
             if path and os.path.exists(path):
                 self.player.setSource(QUrl.fromLocalFile(path))
-                self.player.play()
-                self.visualizer.start()
-                self.play_btn.setText("⏸")
+                if auto_play:
+                    self.player.play()
+                    self.visualizer.start()
+                    self.play_btn.setText("⏸")
+                else:
+                    self.player.pause()
+                    self.visualizer.stop()
+                    self.play_btn.setText("▶")
+                    self.currently_playing_string = "Paused"
+
+                if start_position > 0:
+                    self.player.setPosition(start_position)
+
                 self.now_playing_label.setText(f"{artist} - {title}")
                 self.sub_info_label.setText(f"{album}")
 
                 self.update_favorite_button_state()
                 self.update_upcoming_track_display()
                 self.apply_mixer_effects()
+                self.update_presence_heartbeat()
 
                 pix = QPixmap(art_path) if art_path and os.path.exists(art_path) else QPixmap()
                 if pix.isNull():
@@ -2120,7 +2494,7 @@ class SpotifyUniqueApp(QMainWindow):
                 if not cached_lyrics:
                     cached_lyrics = self.fetch_lyrics_from_lrclib(title, artist,
                                                                   duration) or "Synced lyrics not found."
-                    cursor.execute("UPDATE songs SET lyrics = ? WHERE id = ?", (cached_lyrics, song_id))
+                    cursor.execute("UPDATE songs SET lyrics = %s WHERE id = %s", (cached_lyrics, song_id))
                     conn.commit()
 
                 if "[" in cached_lyrics and ":" in cached_lyrics:
@@ -2131,16 +2505,18 @@ class SpotifyUniqueApp(QMainWindow):
             else:
                 QMessageBox.warning(self, "Playback Error", "Audio file not found on disk.")
 
+        cursor.close()
         conn.close()
+        self.save_playback_state()
 
     def update_upcoming_track_display(self):
         row = self.song_list_widget.currentRow()
         next_row = row + 1
         if next_row < self.song_list_widget.count():
             item = self.song_list_widget.item(next_row)
-            w = self.song_list_widget.itemWidget(item)
-            if w:
-                self.upcoming_label.setText(f"Next: {w.title} - {w.artist}")
+            if item:
+                text = item.text()
+                self.upcoming_label.setText(f"Next: {text.split('  •  ')[0]}")
                 return
         self.upcoming_label.setText("Next: None")
 
@@ -2157,7 +2533,7 @@ class SpotifyUniqueApp(QMainWindow):
             self.switch_view("All Songs")
         else:
             self.current_view_mode = "Artist"
-            self.view_title_label.setText(f"<b style='color: #3b82f6;'>ARTIST: {artist_name.upper()}</b>")
+            self.view_title_label.setText(f"<b style='color: #38bdf8;'>ARTIST: {artist_name.upper()}</b>")
             self.load_songs_to_ui(artist_filter=artist_name)
 
     def select_playlist_from_sidebar(self, item):
@@ -2166,7 +2542,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.current_view_mode = "Playlist"
         self.current_playlist_id = p_id
         p_name = item.text().split(" [ID:")[0].replace("📁 ", "")
-        self.playlist_title_edit.setText(f"<b style='color: #3b82f6;'>📁 {p_name.upper()}</b>")
+        self.playlist_title_edit.setText(f"<b style='color: #38bdf8;'>📁 {p_name.upper()}</b>")
         self.view_title_label.hide()
         self.playlist_header_widget.show()
         self.load_songs_to_ui()
@@ -2174,41 +2550,50 @@ class SpotifyUniqueApp(QMainWindow):
     def create_playlist_dialog(self):
         name, ok = QInputDialog.getText(self, "Create Playlist", "Playlist Name:")
         if ok and name.strip():
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
-            c.execute("INSERT INTO playlists (name, creator) VALUES (?, ?)", (name.strip(), self.current_user))
+            c.execute("INSERT INTO playlists (name, creator) VALUES (%s, %s)", (name.strip(), self.current_user))
             conn.commit()
+            c.close()
             conn.close()
             self.load_playlists_to_sidebar()
 
     def load_playlists_to_sidebar(self):
         self.playlist_list_widget.clear()
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, name FROM playlists")
         for r in c.fetchall():
-            self.playlist_list_widget.addItem(f"📁 {r[1]} [ID:{r[0]}]")
+            self.playlist_list_widget.addItem(f"📁 {r['name']} [ID:{r['id']}]")
+        c.close()
         conn.close()
 
     def update_favorite_button_state(self):
         if not self.current_song_id: return
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT song_id FROM favorites WHERE song_id=?", (self.current_song_id,))
+        c.execute("SELECT song_id FROM favorites WHERE song_id=%s", (self.current_song_id,))
         is_fav = c.fetchone() is not None
+        c.close()
         conn.close()
-        self.fav_player_btn.setStyleSheet("background-color: #ef4444; color: white;" if is_fav else "background-color: #222; color: #fff;")
+        if is_fav:
+            self.fav_player_btn.setStyleSheet(
+                "background-color: #ef4444; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
+        else:
+            self.fav_player_btn.setStyleSheet(
+                "background-color: #222222; color: #FFFFFF; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
 
     def toggle_favorite_current_song(self):
         if not self.current_song_id: return
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT song_id FROM favorites WHERE song_id=?", (self.current_song_id,))
+        c.execute("SELECT song_id FROM favorites WHERE song_id=%s", (self.current_song_id,))
         if c.fetchone():
-            c.execute("DELETE FROM favorites WHERE song_id=?", (self.current_song_id,))
+            c.execute("DELETE FROM favorites WHERE song_id=%s", (self.current_song_id,))
         else:
-            c.execute("INSERT INTO favorites (song_id) VALUES (?)", (self.current_song_id,))
+            c.execute("INSERT INTO favorites (song_id) VALUES (%s) ON CONFLICT DO NOTHING", (self.current_song_id,))
         conn.commit()
+        c.close()
         conn.close()
         self.update_favorite_button_state()
 
@@ -2254,7 +2639,7 @@ class SpotifyUniqueApp(QMainWindow):
 
     def load_songs_to_ui(self, artist_filter=None, album_filter=None):
         self.song_list_widget.clear()
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         search_query = ""
@@ -2263,42 +2648,51 @@ class SpotifyUniqueApp(QMainWindow):
         search_term = f"%{search_query}%"
 
         cursor.execute("SELECT DISTINCT artist FROM songs ORDER BY artist ASC")
-        artists = [row[0] for row in cursor.fetchall()]
+        artists = [row['artist'] for row in cursor.fetchall()]
         self.artist_tab_combo.blockSignals(True)
         self.artist_tab_combo.clear()
         self.artist_tab_combo.addItem("All Artists")
         self.artist_tab_combo.addItems(artists)
         self.artist_tab_combo.blockSignals(False)
 
+        songs = []
         if artist_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE artist=? AND (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY album, title ASC",
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE artist=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY album, title ASC",
                 (artist_filter, search_term, search_term, search_term))
+            songs = cursor.fetchall()
         elif album_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE album=? AND (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY title ASC",
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE album=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY title ASC",
                 (album_filter, search_term, search_term, search_term))
+            songs = cursor.fetchall()
         elif self.current_view_mode == "All Songs":
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE (title LIKE ? OR artist LIKE ? OR album LIKE ?) ORDER BY artist, album, title ASC",
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY artist, album, title ASC",
                 (search_term, search_term, search_term))
+            songs = cursor.fetchall()
         elif self.current_view_mode == "Liked Songs":
             cursor.execute(
-                """SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag 
-                   FROM songs s JOIN favorites f ON s.id = f.song_id 
-                   WHERE (s.title LIKE ? OR s.artist LIKE ? OR s.album LIKE ?)""",
+                """SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag
+                   FROM songs s
+                            JOIN favorites f ON s.id = f.song_id
+                   WHERE (LOWER(s.title) LIKE %s OR LOWER(s.artist) LIKE %s OR LOWER(s.album) LIKE %s)""",
                 (search_term, search_term, search_term))
+            songs = cursor.fetchall()
         elif self.current_view_mode == "Playlist" and self.current_playlist_id:
             cursor.execute("""SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag
-                              FROM songs s JOIN playlist_songs ps ON s.id = ps.song_id 
-                              WHERE ps.playlist_id = ? AND (s.title LIKE ? OR s.artist LIKE ? OR s.album LIKE ?)""",
+                              FROM songs s
+                                       JOIN playlist_songs ps ON s.id = ps.song_id
+                              WHERE ps.playlist_id = %s
+                                AND (LOWER(s.title) LIKE %s OR LOWER(s.artist) LIKE %s OR LOWER(s.album) LIKE %s)""",
                            (self.current_playlist_id, search_term, search_term, search_term))
+            songs = cursor.fetchall()
 
             cursor.execute(
-                "SELECT COUNT(*), SUM(s.duration) FROM playlist_songs ps JOIN songs s ON ps.song_id = s.id WHERE ps.playlist_id = ?",
+                "SELECT COUNT(*), SUM(s.duration) FROM playlist_songs ps JOIN songs s ON ps.song_id = s.id WHERE ps.playlist_id = %s",
                 (self.current_playlist_id,))
             res = cursor.fetchone()
-            song_count = res[0] or 0
+            song_count = res['count'] or 0
             self.playlist_stats_label.setText(f"📊 <b>Songs:</b> {song_count}")
 
             cursor.execute("""
@@ -2306,30 +2700,30 @@ class SpotifyUniqueApp(QMainWindow):
                            FROM playlist_songs ps
                                     JOIN songs s ON ps.song_id = s.id
                                     LEFT JOIN listening_history h ON s.id = h.song_id
-                           WHERE ps.playlist_id = ?
-                           GROUP BY s.id
+                           WHERE ps.playlist_id = %s
+                           GROUP BY s.id, s.title
                            ORDER BY play_count DESC
                            """, (self.current_playlist_id,))
             playlist_tracks = cursor.fetchall()
 
             if playlist_tracks:
-                most_listened = playlist_tracks[0][0]
-                least_listened = playlist_tracks[-1][0]
+                most_listened = playlist_tracks[0]['title']
+                least_listened = playlist_tracks[-1]['title']
                 self.playlist_insights_label.setText(
                     f"🔥 <b>Most Played:</b> {most_listened}  |  ❄️ <b>Least Played:</b> {least_listened}")
             else:
                 self.playlist_insights_label.setText(
                     "🔥 <b>Most Played:</b> None  |  ❄️ <b>Least Played:</b> None")
 
-        songs = cursor.fetchall()
-        for s_id, s_title, s_artist, s_album, s_theme, s_tag in songs:
-            item = QListWidgetItem(self.song_list_widget)
-            w = SongItemWidget(s_id, s_title, s_artist, s_album, s_theme, s_tag, self,
-                               in_playlist=(self.current_view_mode == "Playlist"))
-            item.setSizeHint(w.sizeHint())
+        for s in songs:
+            s_id, s_title, s_artist, s_album, s_theme, s_tag = s['id'], s['title'], s['artist'], s['album'], s['theme'], \
+            s['source_tag']
+            item_text = f"♪  {s_title} — {s_artist}  [{s_album} | {s_tag}]"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, s_id)
             self.song_list_widget.addItem(item)
-            self.song_list_widget.setItemWidget(item, w)
 
+        cursor.close()
         conn.close()
         self.load_playlists_to_sidebar()
 
@@ -2338,15 +2732,19 @@ class SpotifyUniqueApp(QMainWindow):
 
     def set_seek_position(self, pos):
         dur = self.player.duration()
-        if dur > 0: self.player.setPosition(int((pos / 1000) * dur))
+        if dur > 0:
+            self.player.setPosition(int((pos / 1000) * dur))
+            self.save_playback_state()
 
     def change_volume(self, val):
         self.gain_slider.blockSignals(True)
         self.gain_slider.setValue(val)
         self.gain_slider.blockSignals(False)
         self.apply_mixer_effects()
+        self.save_playback_state()
 
-    def format_time(self, ms): return f"{(ms // 1000) // 60:02d}:{(ms // 1000) % 60:02d}"
+    def format_time(self, ms):
+        return f"{(ms // 1000) // 60:02d}:{(ms // 1000) % 60:02d}"
 
     def media_status_changed(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -2379,45 +2777,46 @@ class SpotifyUniqueApp(QMainWindow):
 
     def toggle_playback(self):
         if self.player.isPlaying():
+            self.flush_listening_history()
             self.player.pause()
             self.visualizer.stop()
             self.play_btn.setText("▶")
+            self.currently_playing_string = "Paused"
         else:
             self.player.play()
             self.visualizer.start()
             self.play_btn.setText("⏸")
+        self.update_presence_heartbeat()
+        self.save_playback_state()
 
     def toggle_loop(self):
         self.is_looping = not self.is_looping
-        self.loop_btn.setStyleSheet("background-color: #2563eb; color: white;" if self.is_looping else "background-color: #3b82f6; color: white;")
+        if self.is_looping:
+            self.loop_btn.setStyleSheet(
+                "background-color: #2563eb; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
+        else:
+            self.loop_btn.setStyleSheet(
+                "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
 
     def toggle_shuffle(self):
         self.is_shuffling = not self.is_shuffling
-        self.shuffle_btn.setStyleSheet("background-color: #2563eb; color: white;" if self.is_shuffling else "background-color: #3b82f6; color: white;")
+        if self.is_shuffling:
+            self.shuffle_btn.setStyleSheet(
+                "background-color: #2563eb; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
+        else:
+            self.shuffle_btn.setStyleSheet(
+                "background-color: #3b82f6; color: white; border-radius: 19px; padding: 0px; font-size: 14px; border: none;")
 
-    def update_stats_display(self):
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
-        res = c.fetchone()
+    def update_stats_display_lazy(self):
+        if self.tabs.tabText(self.tabs.currentIndex()) == "📊 Stats":
+            self.bg_worker = BackgroundFetchWorker("stats")
+            self.bg_worker.data_ready.connect(self.populate_stats_ui)
+            self.bg_worker.start()
 
-        c.execute(
-            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY h.song_id ORDER BY COUNT(h.song_id) DESC LIMIT 1")
-        fav_song = c.fetchone()
-
-        c.execute(
-            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
-        fav_art = c.fetchone()
-
-        c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Catalog%' OR source_tag LIKE '%Download%'")
-        downloaded_count = c.fetchone()[0] or 0
-
-        c.execute(
-            "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%Upload%' OR source_tag LIKE '%Import%' OR source_tag LIKE '%Digital%'")
-        imported_count = c.fetchone()[0] or 0
-
-        c.execute("SELECT COUNT(DISTINCT album) FROM songs")
-        total_albums = c.fetchone()[0] or 0
+    def populate_stats_ui(self, results):
+        if not results:
+            return
+        res = results[0]
 
         total_size_bytes = 0
         if os.path.exists(MUSIC_FOLDER):
@@ -2431,20 +2830,18 @@ class SpotifyUniqueApp(QMainWindow):
         storage_mb = f"{total_size_bytes / (1024 * 1024):.1f} MB"
 
         metrics = [
-            ("Total Unique Songs Listened", str(res[0] or 0)),
-            ("Songs Downloaded from Online", str(downloaded_count)),
-            ("Songs Imported / Uploaded Locally", str(imported_count)),
-            ("Total Albums in Library", str(total_albums)),
-            ("Favorite Song", fav_song[0] if fav_song else "None"),
-            ("Favorite Artist", fav_art[0] if fav_art else "None"),
-            ("Liked Songs Count", str(c.execute("SELECT COUNT(*) FROM favorites").fetchone()[0])),
-            ("Playlists Created", str(c.execute("SELECT COUNT(*) FROM playlists").fetchone()[0])),
+            ("Total Unique Songs Listened", str(res["unique_songs"])),
+            ("Songs Downloaded from Online", str(res["dl_count"])),
+            ("Songs Imported / Uploaded Locally", str(res["imp_count"])),
+            ("Total Albums in Library", str(res["albums_count"])),
+            ("Favorite Song", res["fav_song"]),
+            ("Favorite Artist", res["fav_art"]),
+            ("Liked Songs Count", str(res["fav_cnt"])),
+            ("Playlists Created", str(res["pl_cnt"])),
             ("Music Library Storage Footprint", storage_mb)
         ]
 
         self.stats_table.setRowCount(len(metrics))
-        conn.close()
-
         for r_idx, (m, v) in enumerate(metrics):
             m_item, v_item = QTableWidgetItem(m), QTableWidgetItem(v)
             m_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
@@ -2454,13 +2851,17 @@ class SpotifyUniqueApp(QMainWindow):
 
     def update_presence_heartbeat(self):
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             c = conn.cursor()
             now_iso = datetime.datetime.now().isoformat()
             status_text = "Minimized" if not self.isVisible() or self.isMinimized() else "Active"
-            c.execute("UPDATE users SET last_seen=?, status=? WHERE username=?",
-                      (now_iso, status_text, self.current_user))
+
+            playing_msg = self.currently_playing_string if self.player.isPlaying() else "Idle / Paused"
+
+            c.execute("UPDATE users SET last_seen=%s, status=%s, status_message=%s WHERE username=%s",
+                      (now_iso, status_text, playing_msg, self.current_user))
             conn.commit()
+            c.close()
             conn.close()
         except Exception:
             pass
@@ -2476,6 +2877,24 @@ if __name__ == "__main__":
 
     if os.path.exists(LOGO_FILE):
         app.setWindowIcon(QIcon(LOGO_FILE))
+
+
+    def logout_to_auth():
+        if os.path.exists(SESSION_FILE):
+            try:
+                os.remove(SESSION_FILE)
+            except Exception:
+                pass
+        state_file = "playback_state.json"
+        if os.path.exists(state_file):
+            try:
+                os.remove(state_file)
+            except Exception:
+                pass
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, QMainWindow):
+                w.close()
+
 
     while True:
         logged_user = None
@@ -2501,5 +2920,7 @@ if __name__ == "__main__":
 
         app.exec()
 
-        if os.path.exists(SESSION_FILE):
+        if not os.path.exists(SESSION_FILE):
+            continue
+        else:
             break
