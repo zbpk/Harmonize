@@ -1,0 +1,66 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+*.env
+.lyrica.config
+
+# ── YT Music auth files (NEVER commit these) ─────────────────────────────────
+headers_auth.json
+cookies.txt
+*cookies*.txt
+*.cookie
+*cookie*
+
+# ── Proxy / credential files ──────────────────────────────────────────────────
+*_auth.json
+*.credentials
+*.token
+
+# ── Cache directories ─────────────────────────────────────────────────────────
+cache/
+cache_data/
+
+# ── Debug / generated reports ─────────────────────────────────────────────────
+lyrica_debug_report.html
+*.html.bak
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Security directory (if it contains runtime secrets) ──────────────────────
+security/*.key
+security/*.pem
+security/*.p12
+
+# ── Local templates / skills ──────────────────────────────────────────────────
+readme-best-practices/
+readme-best-practice*/
+
+# ── Test result files (generated during integration tests) ───────────────────
+Test/lrcmux/result_*.json
+Test/lrcmux/server.log
+Test/lrcmux/lyrics_response.json
+
+

@@ -1,0 +1,53 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+# Base directory of project
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Caching (Render safe)
+CACHE_DIR = os.getenv("CACHE_DIR") or os.path.join(BASE_DIR, "cache_data")
+CACHE_TTL = int(os.getenv("CACHE_TTL", 86400))  # seconds (default: 24 hours — lyrics never change)
+
+# Admin security key (MUST be set on Render)
+ADMIN_KEY = os.getenv("ADMIN_KEY")
+
+
+# logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# external tokens (must be provided via environment variables in production)
+GENIUS_TOKEN = os.getenv("GENIUS_TOKEN", "")
+
+# Apple Music (requires Apple Music Developer token)
+APPLE_MUSIC_DEVELOPER_TOKEN = os.getenv("APPLE_MUSIC_DEVELOPER_TOKEN") or os.getenv("DEVELOPER_TOKEN", "")
+APPLE_MUSIC_USER_TOKEN = os.getenv("APPLE_MUSIC_USER_TOKEN") or os.getenv("MUSIC_USER_TOKEN", "")
+APPLE_STOREFRONT = os.getenv("APPLE_STOREFRONT", "us")
+APPLE_LYRICS_LANGUAGE = os.getenv("APPLE_LYRICS_LANGUAGE", "en")
+APPLE_LYRICS_SCRIPT = os.getenv("APPLE_LYRICS_SCRIPT", "latin")
+
+# The current YouTube fetcher uses public APIs and caption fallbacks, so no
+# cookie-based auth is required or consumed by the runtime.
+
+# lrclib
+LRCLIB_API_URL = os.getenv("LRCLIB_API_URL", "https://lrclib.net/api/get")
+
+# lrcmux
+LRCMUX_API_URL = os.getenv("LRCMUX_API_URL", "https://api.lrcmux.dev")
+
+# Redis connection URL (optional — enables L2 distributed cache across workers/containers)
+# Example: redis://:password@redis-host:6379/0 or redis://localhost:6379/0
+REDIS_URL = os.getenv("REDIS_URL", "")
+
+# Rate limiting storage backend (recommended: Redis for production)
+# Example: redis://:password@redis-host:6379/0
+RATE_LIMIT_STORAGE_URI = os.getenv("RATE_LIMIT_STORAGE_URI", REDIS_URL or "memory://")
+
+# ── Groq AI (Translation & Romanization) ────────────────────────────────────
+# Comma-separated list of API keys for load balancing:
+#   GROQ_API_KEY=gsk_abc123,gsk_def456,gsk_ghi789
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+

@@ -1,0 +1,57 @@
+# ============================================================
+# Lyrica API — Python Dependencies
+# Last updated: 2026-09-06
+# Python version: 3.11+
+# ============================================================
+
+# ── Web framework ────────────────────────────────────────────
+flask[async]==3.1.3          # async view support (required for async def routes)
+Werkzeug==3.1.6              # pinned to match Flask 3.0.x
+flask-cors==6.0.0            # CORS headers
+
+# ── HTTP server (production) ─────────────────────────────────
+gunicorn==22.0.0             # WSGI production server for Render / VPS / Linux
+                             # Start cmd: gunicorn -c gunicorn.config.py run:app
+
+# ── Async HTTP client (replaces requests in all fetchers) ────
+httpx==0.28.1                # async HTTP with high-concurrency connection pooling
+
+# ── Ultra-fast JSON serialization ────────────────────────────
+orjson>=3.10.0               # C-based JSON parsing (5-10x faster than stdlib json)
+
+# ── Retry logic ──────────────────────────────────────────────
+tenacity==8.3.0              # exponential backoff in fetch_controller + fetchers
+
+# ── Response compression ─────────────────────────────────────
+flask-compress==1.15         # gzip all API responses (60-80% size reduction)
+
+# ── Rate limiting ────────────────────────────────────────────
+Flask-Limiter==3.7.0         # per-IP rate limiting
+limits==3.12.0               # backend for Flask-Limiter
+
+# ── Environment / config ─────────────────────────────────────
+python-dotenv==1.2.2         # load .env in development
+
+# ── Lyrics sources ───────────────────────────────────────────
+lyricsgenius==3.0.1          # Genius API (requires GENIUS_TOKEN env var)
+ytmusicapi==1.7.4            # YouTube Music (no auth required)
+yt-dlp>=2026.6.9             # YouTube fallback / audio info + subtitle extraction
+youtube-transcript-api==1.2.4 # YouTube caption/transcript fetcher (Layer 2 of YouTube source)
+syncedlyrics==1.0.1          # Synced LRC lyrics: NetEase, Megalobiz, Musixmatch providers
+
+# ── NLP / sentiment ──────────────────────────────────────────
+textblob==0.18.0             # sentiment analysis on lyrics
+
+# ── Async helpers ────────────────────────────────────────────
+nest_asyncio==1.6.0          # allows nested event loops (Flask sync→async bridge)
+anyio==4.14.2                 # async compatibility layer used by httpx
+
+# ── Groq AI (Translation & Romanization) ────────────────────
+groq==1.6.0                  # Official Groq SDK for openai/gpt-oss-120b
+
+# ── Redis caching backend (distributed L2 cache) ─────────────
+redis>=5.0.0                 # Redis client for L2 cache and rate limiting
+# hiredis>=2.3.2             # Optional C parser for redis — much faster
+
+# ── Concurrency worker for gunicorn (optional) ───────────────
+gevent>=24.2.1               # Greenlet-based high concurrency worker

@@ -1,0 +1,1296 @@
+from flask import jsonify, request, render_template
+from datetime import datetime, timezone
+import os
+import asyncio
+import logging
+import httpx as _httpx
+
+from src.proxy_manager import get_proxy_manager
+from src.user_config import get_user_config, reload_user_config
+
+from src.logger import get_logger
+from src.cache import make_cache_key, load_from_cache, save_to_cache, clear_cache, cache_stats
+from src.fetch_controller import fetch_lyrics_controller
+from src.sentiment_analyzer import analyze_sentiment, analyze_word_frequency, extract_lyrics_text
+from src.metadata_extractor import enhance_lyrics_with_metadata, get_metadata_only
+from src.sources.jiosaavan_fetcher import search_jiosaavn, get_jiosaavn_stream
+from src.trending_analytics import TrendingAnalyticsEngine, Country
+from src import __version__
+from src.config import ADMIN_KEY, GROQ_MODEL
+from src.groq_processor import process_lyrics
+from src.groq_key_manager import get_key_manager
+from src.translation_cache import (
+    make_translation_cache_key,
+    load_translation_cache,
+    save_translation_cache,
+    translation_cache_stats,
+)
+
+logger = get_logger("router")
+
+# Initialize Trending Analytics Engine (global instance)
+trending_engine = TrendingAnalyticsEngine(cache_ttl_hours=24)
+
+def run_async(coro, timeout=30):
+    """Run async coroutine safely in sync context with timeout"""
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        if loop.is_running():
+            import nest_asyncio
+            nest_asyncio.apply()
+            return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+        return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+    except asyncio.TimeoutError:
+        logger.error("Async operation timed out")
+        raise Exception("Request timed out - operation took too long")
+    except Exception:
+        # Fallback to new event loop on closed loop or other RuntimeError
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout))
+        except Exception as e:
+            logger.error(f"Fallback run_async failed: {e}")
+            raise
+
+
+def register_routes(app):
+    @app.route("/")
+    def home():
+        """Main API documentation endpoint"""
+        return jsonify(
+            {
+                "api": "Lyrica",
+                "version": app.config.get("VERSION", __version__),
+                "status": "active",
+                "description": "A comprehensive lyrics API with mood analysis, metadata extraction, and trending insights",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "endpoints": {
+                    "lyrics": {
+                        "url": "/lyrics/",
+                        "method": "GET",
+                        "description": "Fetch lyrics for a song",
+                        "examples": [
+                            "/lyrics/?artist=The Beatles&song=Imagine",
+                            "/lyrics/?artist=The Beatles&song=Imagine&timestamps=true",
+                            "/lyrics/?artist=The Beatles&song=Imagine&mood=true",
+                            "/lyrics/?artist=The Beatles&song=Imagine&metadata=true",
+                            "/lyrics/?artist=The Beatles&song=Imagine&translate=true&language=en",
+                            "/lyrics/?artist=The Beatles&song=Imagine&romanize=true&language=hindi",
+                            "/lyrics/?artist=The Beatles&song=Imagine&timestamps=true&translate=true&romanize=true&language=en",
+                            "/lyrics/?artist=The Beatles&song=Imagine&fast=true&timestamps=true&mood=true&metadata=true"
+                        ]
+                    },
+                    "metadata_only": {
+                        "url": "/metadata/",
+                        "method": "GET",
+                        "description": "Get song metadata without lyrics",
+                        "examples": [
+                            "/metadata/?artist=The Beatles&song=Imagine"
+                        ]
+                    },
+                    "trending": {
+                        "url": "/trending/",
+                        "method": "GET",
+                        "description": "Get trending songs by country",
+                        "examples": [
+                            "/trending/?country=US&limit=20",
+                            "/trending/?country=IN",
+                            "/trending/?countries=US,GB,IN&limit=10"
+                        ]
+                    },
+                    "top_queries": {
+                        "url": "/analytics/top-queries/",
+                        "method": "GET",
+                        "description": "Get top user queries globally or by country",
+                        "examples": [
+                            "/analytics/top-queries/?limit=20",
+                            "/analytics/top-queries/?country=US&limit=10",
+                            "/analytics/top-queries/?country=US&days=7&limit=15"
+                        ]
+                    },
+                    "trending_by_country": {
+                        "url": "/analytics/trending-by-country/",
+                        "method": "GET",
+                        "description": "Get top queries for each country",
+                        "examples": [
+                            "/analytics/trending-by-country/?limit=10"
+                        ]
+                    },
+                    "trending_vs_queries": {
+                        "url": "/analytics/trending-vs-queries/",
+                        "method": "GET",
+                        "description": "Compare trending songs with top user queries",
+                        "examples": [
+                            "/analytics/trending-vs-queries/?country=US&limit=10"
+                        ]
+                    },
+                    "trending_intersection": {
+                        "url": "/analytics/trending-intersection/",
+                        "method": "GET",
+                        "description": "Find queries that match trending songs",
+                        "examples": [
+                            "/analytics/trending-intersection/?country=US&limit=10"
+                        ]
+                    },
+                    "jiosaavn_search": {
+                        "url": "/api/jiosaavn/search",
+                        "method": "GET",
+                        "description": "Search for songs on JioSaavn",
+                        "examples": [
+                            "/api/jiosaavn/search?q=Imagine"
+                        ]
+                    },
+                    "jiosaavn_play": {
+                        "url": "/api/jiosaavn/play",
+                        "method": "GET",
+                        "description": "Get playable stream URL from JioSaavn",
+                        "examples": [
+                            "/api/jiosaavn/play?songLink=<song_link>"
+                        ]
+                    },
+                    "cache_stats": {
+                        "url": "/cache/stats",
+                        "method": "GET",
+                        "description": "Get cache statistics"
+                    },
+                    "suggestion": {
+                        "url": "/suggestion",
+                        "method": "GET",
+                        "description": "Search for songs by name and return matching titles with their artist",
+                        "examples": [
+                            "/suggestion?q=Imagine",
+                            "/suggestion?q=Imagine&limit=5"
+                        ]
+                    },
+                    "music_app": {
+                        "url": "/app",
+                        "method": "GET",
+                        "description": "Access the web-based music application"
+                    }
+                },
+                "parameters": {
+                    "artist": {
+                        "type": "string",
+                        "required": True,
+                        "description": "Artist name"
+                    },
+                    "song": {
+                        "type": "string",
+                        "required": True,
+                        "description": "Song title"
+                    },
+                    "country": {
+                        "type": "string",
+                        "required": False,
+                        "description": "Country code (US, GB, IN, BR, JP, DE, FR, CA, AU, MX)"
+                    },
+                    "countries": {
+                        "type": "string",
+                        "required": False,
+                        "description": "Comma-separated country codes"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "required": False,
+                        "default": 20,
+                        "description": "Number of results to return"
+                    },
+                    "days": {
+                        "type": "integer",
+                        "required": False,
+                        "description": "Time window in days for query analytics"
+                    },
+                    "timestamps": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Include synchronized timestamps with lyrics"
+                    },
+                    "mood": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Analyze song mood/sentiment and top words"
+                    },
+                    "metadata": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Include song metadata (cover art, duration, genre, etc.)"
+                    },
+                    "fast": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Use parallel fetching for faster results"
+                    },
+                    "translate": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Translate lyrics to target language (requires GROQ_API_KEY)"
+                    },
+                    "romanize": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Romanize/transliterate lyrics to target language script (requires GROQ_API_KEY)"
+                    },
+                    "language": {
+                        "type": "string",
+                        "required": False,
+                        "default": "en",
+                        "description": "Target language for translate/romanize (e.g., en, hindi, spanish, japanese)"
+                    },
+                    "word": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Request word-level synced lyrics (e.g., from Lrcmux or Apple Music)"
+                    },
+                    "syllabus": {
+                        "type": "boolean",
+                        "required": False,
+                        "default": False,
+                        "description": "Request syllable-level synced lyrics (Apple Music only)"
+                    }
+                },
+                "fetchers": {
+                    "1": "Genius (requires GENIUS_TOKEN)",
+                    "2": "LRCLIB",
+                    "3": "YouTube Music (3-layer: ytmusicapi [authenticated] / transcript-api / yt-dlp)",
+                    "4": "NetEase (via syncedlyrics, synced LRC)",
+                    "5": "Megallobiz (via syncedlyrics, synced LRC)",
+                    "6": "Musixmatch (via syncedlyrics, optional MUSIXMATCH_TOKEN)",
+                    "7": "Lrcmux (via api.lrcmux.dev, Musixmatch lyrics; supports word-level sync with &word=true)",
+                    "8": "Apple Music (requires APPLE_MUSIC_DEVELOPER_TOKEN; syllable-level with &syllabus=true, word-level with &word=true)",
+                }
+            }
+        )
+
+    @app.route("/lyrics/", methods=["GET"])
+    def lyrics():
+        """Fetch lyrics with optional mood analysis and metadata"""
+        # ── Load config defaults (query params always win) ────────────────
+        try:
+            cfg = get_user_config()
+        except Exception:
+            cfg = None
+
+        artist = request.args.get("artist", "").strip()
+        song = request.args.get("song", "").strip()
+        country = request.args.get("country", "US").strip().upper()
+
+        # Apply config defaults when query param not explicitly supplied
+        _ts_default = (cfg.default_timestamps if cfg else False)
+        timestamps = (
+            request.args.get("timestamps", str(_ts_default)).lower() == "true"
+            or request.args.get("timestamp",  str(_ts_default)).lower() == "true"
+        )
+        pass_param = request.args.get("pass", "false").lower() == "true"
+        sequence   = request.args.get("sequence", cfg.default_sequence if cfg else None)
+        fast_mode  = request.args.get("fast",  str(cfg.default_fast     if cfg else False)).lower() == "true"
+        analyze_mood      = request.args.get("mood",     str(cfg.default_mood     if cfg else False)).lower() == "true"
+        include_metadata  = request.args.get("metadata", str(cfg.default_metadata if cfg else False)).lower() == "true"
+        do_translate = request.args.get("translate", str(cfg.default_translate if cfg else False)).lower() == "true"
+        do_romanize  = request.args.get("romanize",  str(cfg.default_romanize  if cfg else False)).lower() == "true"
+        word_level   = request.args.get("word",      str(cfg.default_word      if cfg else False)).lower() == "true"
+        syllabus     = request.args.get("syllabus",  "false").lower() == "true"
+        target_language = request.args.get("language", cfg.default_language if cfg else "en").strip().lower()
+        _fast_timeout = cfg.fast_timeout if cfg else 20
+
+        if not artist or not song:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Artist and song name are required",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        if pass_param and not sequence:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Sequence parameter is required when pass=true",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        logger.info(
+            f"Lyrics request: {artist} - {song} (fast={fast_mode}, mood={analyze_mood}, "
+            f"metadata={include_metadata}, translate={do_translate}, romanize={do_romanize}, "
+            f"word={word_level}, syllabus={syllabus}, lang={target_language})"
+        )
+
+        # Record user query for analytics
+        try:
+            trending_engine.record_user_query(
+                user_id=request.remote_addr,
+                query=f"{artist} - {song}",
+                country=country
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record user query: {str(e)}")
+
+        # 1. Check Cache First
+        cache_key = make_cache_key(
+            artist, song, timestamps, sequence, fast_mode,
+            analyze_mood, include_metadata,
+            translate=do_translate, romanize=do_romanize, language=target_language,
+            word_level=word_level,
+            syllabus=syllabus,
+        )
+        cached = load_from_cache(cache_key)
+
+        if cached:
+            logger.info(f"Cache hit for {artist} - {song}")
+            return jsonify(cached)
+
+        # 2. Fetch Fresh Data
+        try:
+            result = run_async(
+                fetch_lyrics_controller(
+                    artist,
+                    song,
+                    timestamps=timestamps,
+                    pass_param=pass_param,
+                    sequence=sequence,
+                    fast_mode=fast_mode,
+                    fast_timeout=_fast_timeout,
+                    word_level=word_level,
+                    syllabus=syllabus,
+                ),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout fetching lyrics for {artist} - {song}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Request timed out",
+                        "details": "Lyrics fetch took too long",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                504,
+            )
+        except Exception as e:
+            logger.error(f"Error fetching lyrics: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to fetch lyrics",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+        if not isinstance(result, dict):
+            logger.error(f"Invalid result type from fetch_lyrics_controller: {type(result)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Invalid response from lyrics fetcher",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+        # 3. Analyze mood if requested
+        if analyze_mood and result.get("status") == "success":
+            data = result.get("data", {})
+            lyrics_text = extract_lyrics_text(data)
+
+            if lyrics_text:
+                try:
+                    sentiment = analyze_sentiment(lyrics_text)
+                    word_freq = analyze_word_frequency(lyrics_text, top_n=5)
+
+                    result["mood_analysis"] = {
+                        "sentiment": sentiment,
+                        "top_words": word_freq,
+                    }
+                    logger.info(f"Mood analysis completed for {artist} - {song}")
+                except Exception as e:
+                    logger.warning(f"Mood analysis failed: {str(e)}")
+                    result["mood_analysis"] = {
+                        "error": "Unable to perform mood analysis",
+                        "details": str(e),
+                    }
+            else:
+                logger.warning("Could not extract lyrics for mood analysis")
+                result["mood_analysis"] = {"error": "Unable to extract lyrics for analysis"}
+
+        # 4. Include metadata if requested
+        if include_metadata and result.get("status") == "success":
+            try:
+                metadata_result = enhance_lyrics_with_metadata(result, artist, song)
+                if asyncio.iscoroutine(metadata_result):
+                    metadata_result = run_async(metadata_result, timeout=30)
+                result = metadata_result
+                logger.info(f"Metadata enhanced for {artist} - {song}")
+            except Exception as e:
+                logger.warning(f"Metadata enhancement failed: {str(e)}")
+                result["metadata_error"] = f"Could not retrieve metadata: {str(e)}"
+
+        # 5. Translate / Romanize if requested
+        if (do_translate or do_romanize) and result.get("status") == "success":
+            data = result.get("data", {})
+
+            # Check if Groq keys are configured
+            if not get_key_manager().has_keys:
+                return (
+                    jsonify({
+                        "status": "error",
+                        "error": {
+                            "message": "Translation/romanization requires a Groq API key. "
+                                       "Set GROQ_API_KEY in your .env file.",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }),
+                    503,
+                )
+
+            # Check translation cache first
+            trans_cache_key = make_translation_cache_key(
+                artist, song,
+                data.get("source", "unknown"),
+                target_language,
+                do_translate, do_romanize,
+                data.get("hasTimestamps", False),
+            )
+            cached_translation = load_translation_cache(trans_cache_key)
+
+            if cached_translation:
+                # Merge cached translation into result
+                result = cached_translation
+                logger.info(f"Translation cache hit for {artist} - {song}")
+            else:
+                # Extract lyric lines for LLM processing
+                has_timed = data.get("hasTimestamps", False) and data.get("timed_lyrics")
+
+                if has_timed:
+                    lyrics_lines = [entry.get("text", "") for entry in data["timed_lyrics"]]
+                else:
+                    raw_lyrics = data.get("lyrics", "")
+                    lyrics_lines = raw_lyrics.split("\n") if raw_lyrics else []
+
+                if lyrics_lines:
+                    try:
+                        groq_result = run_async(
+                            process_lyrics(
+                                lyrics_lines=lyrics_lines,
+                                target_language=target_language,
+                                translate=do_translate,
+                                romanize=do_romanize,
+                            ),
+                            timeout=120,
+                        )
+
+                        translated_lines = groq_result.get("translated")
+                        romanized_lines = groq_result.get("romanized")
+                        metadata = groq_result.get("metadata", {})
+
+                        # Add translation_metadata to data
+                        data["translation_metadata"] = {
+                            "target_language": metadata.get("target_language", target_language),
+                            "processed_by": metadata.get("processed_by", f"groq/{GROQ_MODEL}"),
+                            "cached_from": "fresh",
+                        }
+
+
+                        if has_timed:
+                            # Synced lyrics: add romanized/translated to each timed_lyrics entry
+                            for i, entry in enumerate(data["timed_lyrics"]):
+                                if do_translate and translated_lines and i < len(translated_lines):
+                                    entry["translated"] = translated_lines[i]
+                                if do_romanize and romanized_lines and i < len(romanized_lines):
+                                    entry["romanized"] = romanized_lines[i]
+                        else:
+                            # Unsynced lyrics: add as top-level strings
+                            if do_translate and translated_lines:
+                                data["translated_lyrics"] = "\n".join(translated_lines)
+                            if do_romanize and romanized_lines:
+                                data["romanized_lyrics"] = "\n".join(romanized_lines)
+
+                        result["data"] = data
+
+                        # Save to translation cache
+                        try:
+                            save_translation_cache(trans_cache_key, result)
+                            logger.info(f"Translation cached for {artist} - {song}")
+                        except Exception as e:
+                            logger.warning(f"Translation cache save failed: {str(e)}")
+
+                        logger.info(f"Translation/romanization completed for {artist} - {song}")
+
+                    except Exception as e:
+                        logger.error(f"Translation/romanization failed: {str(e)}")
+                        result["translation_error"] = f"Translation processing failed: {str(e)}"
+
+        # 6. Cache if successful
+        if result.get("status") == "success":
+            data = result.get("data", {})
+            if data.get("lyrics") or data.get("plain_lyrics") or data.get("lyrics_text"):
+                try:
+                    save_to_cache(cache_key, result)
+                    logger.info(f"Result cached for {artist} - {song}")
+                except Exception as e:
+                    logger.warning(f"Cache save failed: {str(e)}")
+            else:
+                logger.warning(
+                    f"Fetch successful but no lyrics content found for {artist} - {song}. Skipping cache."
+                )
+
+        return jsonify(result)
+
+    @app.route("/metadata/", methods=["GET"])
+    def metadata():
+        """Get song metadata only (without lyrics)"""
+        artist = request.args.get("artist", "").strip()
+        song = request.args.get("song", "").strip()
+
+        if not artist or not song:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Artist and song name are required",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        logger.info(f"Metadata request for {artist} - {song}")
+        
+        try:
+            result = get_metadata_only(artist, song)
+            if asyncio.iscoroutine(result):
+                result = run_async(result, timeout=30)
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout fetching metadata for {artist} - {song}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Request timed out",
+                        "details": "Metadata fetch took too long",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                504,
+            )
+        except Exception as e:
+            logger.error(f"Metadata fetch error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to fetch metadata",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+        return jsonify(result)
+
+    @app.route("/trending/", methods=["GET"])
+    def trending():
+        """Get trending songs by country"""
+        country = request.args.get("country", "US").strip().upper()
+        countries_param = request.args.get("countries", "").strip()
+        limit = request.args.get("limit", 20, type=int)
+
+        if limit < 1 or limit > 100:
+            limit = 20
+
+        logger.info(f"Trending request: country={country}, limit={limit}")
+
+        try:
+            # Handle single country
+            if country and not countries_param:
+                try:
+                    country_enum = Country[country]
+                    trending_songs = trending_engine.fetch_trending_songs(country_enum, limit)
+                    
+                    return jsonify({
+                        "status": "success",
+                        "data": {
+                            "country": country,
+                            "trending": [song.to_dict() for song in trending_songs],
+                            "total": len(trending_songs),
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    })
+                except KeyError:
+                    return jsonify({
+                        "status": "error",
+                        "error": {
+                            "message": f"Invalid country code: {country}",
+                            "valid_countries": [c.value for c in Country],
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        }
+                    }), 400
+
+            # Handle multiple countries
+            elif countries_param:
+                country_list = [c.strip().upper() for c in countries_param.split(",")]
+                trending_data = {}
+                
+                for c in country_list:
+                    try:
+                        country_enum = Country[c]
+                        trending_songs = trending_engine.fetch_trending_songs(country_enum, limit)
+                        trending_data[c] = [song.to_dict() for song in trending_songs]
+                    except KeyError:
+                        logger.warning(f"Invalid country code: {c}")
+                        continue
+
+                return jsonify({
+                    "status": "success",
+                    "data": {
+                        "countries": trending_data,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+                })
+
+        except Exception as e:
+            logger.error(f"Trending fetch error: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to fetch trending data",
+                    "details": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 500
+
+    @app.route("/analytics/top-queries/", methods=["GET"])
+    def top_queries():
+        """Get top user queries globally or by country"""
+        limit = request.args.get("limit", 20, type=int)
+        country = request.args.get("country", "").strip().upper()
+        days = request.args.get("days", None, type=int)
+
+        if limit < 1 or limit > 100:
+            limit = 20
+
+        logger.info(f"Top queries request: limit={limit}, country={country}, days={days}")
+
+        try:
+            top_q = trending_engine.get_top_queries(
+                limit=limit,
+                country=country if country else None,
+                days=days
+            )
+
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "scope": "global" if not country else f"country_{country}",
+                    "time_window": f"{days} days" if days else "all_time",
+                    "top_queries": [{"query": q, "count": c} for q, c in top_q],
+                    "total_unique": len(top_q),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Top queries fetch error: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to fetch top queries",
+                    "details": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 500
+
+    @app.route("/analytics/trending-by-country/", methods=["GET"])
+    def trending_by_country():
+        """Get top queries for each country"""
+        limit = request.args.get("limit", 10, type=int)
+
+        if limit < 1 or limit > 100:
+            limit = 10
+
+        logger.info(f"Trending by country request: limit={limit}")
+
+        try:
+            top_by_country = trending_engine.get_top_queries_by_country(limit=limit)
+
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "countries": {
+                        country: [{"query": q, "count": c} for q, c in queries]
+                        for country, queries in top_by_country.items()
+                    },
+                    "total_countries": len(top_by_country),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Trending by country error: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to fetch trending by country",
+                    "details": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 500
+
+    @app.route("/analytics/trending-vs-queries/", methods=["GET"])
+    def trending_vs_queries():
+        """Compare trending songs with top user queries"""
+        country = request.args.get("country", "US").strip().upper()
+        limit = request.args.get("limit", 10, type=int)
+
+        if limit < 1 or limit > 100:
+            limit = 10
+
+        logger.info(f"Trending vs queries request: country={country}, limit={limit}")
+
+        try:
+            country_enum = Country[country]
+            comparison = trending_engine.get_trending_vs_user_queries(country_enum, limit)
+
+            return jsonify({
+                "status": "success",
+                "data": comparison
+            })
+
+        except KeyError:
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": f"Invalid country code: {country}",
+                    "valid_countries": [c.value for c in Country],
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 400
+        except Exception as e:
+            logger.error(f"Trending vs queries error: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to fetch trending vs queries",
+                    "details": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 500
+
+    @app.route("/analytics/trending-intersection/", methods=["GET"])
+    def trending_intersection():
+        """Find queries that match trending songs"""
+        country = request.args.get("country", "US").strip().upper()
+        limit = request.args.get("limit", 10, type=int)
+
+        if limit < 1 or limit > 100:
+            limit = 10
+
+        logger.info(f"Trending intersection request: country={country}, limit={limit}")
+
+        try:
+            country_enum = Country[country]
+            matches = trending_engine.get_trending_intersection(country_enum, limit)
+
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "country": country,
+                    "matches": matches,
+                    "total_matches": len(matches),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            })
+
+        except KeyError:
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": f"Invalid country code: {country}",
+                    "valid_countries": [c.value for c in Country],
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 400
+        except Exception as e:
+            logger.error(f"Trending intersection error: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to fetch trending intersection",
+                    "details": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            }), 500
+
+    @app.route("/api/jiosaavn/search", methods=["GET"])
+    def jiosaavn_search():
+        """Search for songs on JioSaavn"""
+        query = request.args.get("q", "").strip()
+        
+        if not query:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Query parameter 'q' is required",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        logger.info(f"JioSaavn search query: {query}")
+        
+        try:
+            results = search_jiosaavn(query)
+            if asyncio.iscoroutine(results):
+                results = run_async(results, timeout=30)
+            return jsonify({"status": "success", "results": results})
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout searching JioSaavn for: {query}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Request timed out",
+                        "details": "JioSaavn search took too long",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                504,
+            )
+        except Exception as e:
+            logger.error(f"JioSaavn search error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to search JioSaavn",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+    @app.route("/api/jiosaavn/play", methods=["GET"])
+    def jiosaavn_play():
+        """Get playable stream URL from JioSaavn"""
+        song_link = request.args.get("songLink", "").strip()
+        
+        if not song_link:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "songLink parameter is required",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        logger.info(f"JioSaavn play request for: {song_link}")
+        
+        try:
+            data = get_jiosaavn_stream(song_link)
+            if asyncio.iscoroutine(data):
+                data = run_async(data, timeout=30)
+            
+            if not data or not isinstance(data, dict):
+                return (
+                    jsonify({
+                        "status": "error",
+                        "error": {
+                            "message": "Invalid response from JioSaavn",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }),
+                    500,
+                )
+
+            if not data.get("stream_url"):
+                return (
+                    jsonify({
+                        "status": "error",
+                        "error": {
+                            "message": "Unable to fetch stream URL",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                    }),
+                    500,
+                )
+
+            return jsonify({"status": "success", "data": data})
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout fetching stream for: {song_link}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Request timed out",
+                        "details": "Stream fetch took too long",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                504,
+            )
+        except Exception as e:
+            logger.error(f"JioSaavn play error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to fetch stream",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+    @app.route("/suggestion", methods=["GET"])
+    def suggestion():
+        """Search MusicBrainz for songs matching a query and return title + artist"""
+        query = request.args.get("q", "").strip()
+        limit = request.args.get("limit", 10, type=int)
+
+        if not query:
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Query parameter 'q' is required",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                400,
+            )
+
+        if limit < 1 or limit > 100:
+            limit = 10
+
+        logger.info(f"Suggestion request: q={query}, limit={limit}")
+
+        try:
+            with _httpx.Client(timeout=10) as client:
+                resp = client.get(
+                    "https://musicbrainz.org/ws/2/recording/",
+                    params={"query": query, "fmt": "json", "limit": limit},
+                    headers={"User-Agent": "Lyrica/1.0 (https://github.com/Wilooper/Lyrica)"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except _httpx.TimeoutException:
+            logger.error(f"Timeout querying MusicBrainz for: {query}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Request timed out while contacting MusicBrainz",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                504,
+            )
+        except Exception as e:
+            logger.error(f"MusicBrainz suggestion error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to fetch suggestions from MusicBrainz",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+        recordings = data.get("recordings", [])
+        results = []
+        for rec in recordings:
+            title = rec.get("title", "")
+            artist_credits = rec.get("artist-credit", [])
+            artist_parts = []
+            for credit in artist_credits:
+                if isinstance(credit, dict) and "artist" in credit:
+                    artist_parts.append(credit["artist"].get("name", ""))
+                    artist_parts.append(credit.get("joinphrase", ""))
+                elif isinstance(credit, str):
+                    artist_parts.append(credit)
+            artist = "".join(artist_parts).strip() or "Unknown Artist"
+            results.append({"title": title, "artist": artist})
+
+        return jsonify({
+            "status": "success",
+            "query": query,
+            "limit": limit,
+            "total": len(results),
+            "results": results,
+        })
+
+    @app.route("/app", methods=["GET"])
+    def app_page():
+        """Serve the web-based music application"""
+        try:
+            return render_template("index.html")
+        except Exception as e:
+            logger.error(f"Failed to render app page: {str(e)}")
+            return jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Failed to load application",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            }), 500
+
+    @app.route("/cache/stats", methods=["GET"])
+    def route_cache_stats():
+        """Get cache statistics and information"""
+        try:
+            stats = cache_stats()
+            return jsonify({"status": "success", **stats})
+        except Exception as e:
+            logger.error(f"Cache stats error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to retrieve cache stats",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+    @app.route("/cache/clear", methods=["POST"])
+    def route_clear_cache():
+        """Clear all cached data (Admin only)"""
+        # Require admin key via query param or header
+        key = request.args.get("key") or request.headers.get("X-ADMIN-KEY")
+        if not ADMIN_KEY or key != ADMIN_KEY:
+            return (
+                jsonify({"status": "error", "error": {"message": "Unauthorized"}}),
+                403,
+            )
+        try:
+            res = clear_cache()
+            logger.info("Cache cleared")
+            return jsonify({"status": "success", "details": res})
+        except Exception as e:
+            logger.error(f"Cache clear error: {str(e)}")
+            return (
+                jsonify({
+                    "status": "error",
+                    "error": {
+                        "message": "Failed to clear cache",
+                        "details": str(e),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                }),
+                500,
+            )
+
+    @app.route("/favicon.ico", methods=["GET"])
+    def favicon():
+        """Favicon endpoint"""
+        return "", 204
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: Health check
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        """Lightweight health check — returns 200 OK with version info"""
+        return jsonify({
+            "status":    "ok",
+            "version":   app.config.get("VERSION", __version__),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: Proxy management endpoints (admin-key protected)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _admin_check():
+        """Return (True, None) if admin key is valid, else (False, response)."""
+        from src.config import ADMIN_KEY
+        key = request.args.get("key") or request.headers.get("X-ADMIN-KEY")
+        if not ADMIN_KEY or key != ADMIN_KEY:
+            return False, (jsonify({"status": "error", "error": {"message": "Unauthorized — admin key required"}}), 403)
+        return True, None
+
+    @app.route("/v2/proxy/set", methods=["POST"])
+    def proxy_set():
+        """Add a proxy to the pool (admin-key protected)"""
+        ok, err = _admin_check()
+        if not ok:
+            return err
+
+        body = request.get_json(silent=True) or {}
+        proxy_url = (body.get("proxy") or request.args.get("proxy", "")).strip()
+
+        if not proxy_url:
+            return jsonify({"status": "error", "error": {"message": "`proxy` field is required"}}), 400
+
+        added = get_proxy_manager().add(proxy_url)
+        return jsonify({
+            "status":  "success" if added else "skipped",
+            "message": "Proxy added" if added else "Proxy already in pool or invalid",
+            "pool_size": get_proxy_manager().size(),
+        })
+
+    @app.route("/v2/proxy/remove", methods=["DELETE", "POST"])
+    def proxy_remove():
+        """Remove a proxy from the pool by URL (admin-key protected)"""
+        ok, err = _admin_check()
+        if not ok:
+            return err
+
+        body = request.get_json(silent=True) or {}
+        proxy_url = (body.get("proxy") or request.args.get("proxy", "")).strip()
+
+        if not proxy_url:
+            return jsonify({"status": "error", "error": {"message": "`proxy` field is required"}}), 400
+
+        removed = get_proxy_manager().remove(proxy_url)
+        return jsonify({
+            "status":  "success" if removed else "not_found",
+            "message": "Proxy removed" if removed else "Proxy not found in pool",
+            "pool_size": get_proxy_manager().size(),
+        })
+
+    @app.route("/v2/proxy/list", methods=["GET"])
+    def proxy_list():
+        """List all proxies with masked credentials (admin-key protected)"""
+        ok, err = _admin_check()
+        if not ok:
+            return err
+
+        return jsonify({
+            "status":  "success",
+            "pool_size": get_proxy_manager().size(),
+            "proxies": get_proxy_manager().list_masked(),
+        })
+
+    @app.route("/v2/proxy/clear", methods=["POST"])
+    def proxy_clear():
+        """Remove all proxies from the pool (admin-key protected)"""
+        ok, err = _admin_check()
+        if not ok:
+            return err
+
+        count = get_proxy_manager().clear()
+        return jsonify({
+            "status":  "success",
+            "message": f"{count} proxies removed",
+            "pool_size": 0,
+        })
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: Config management endpoints
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @app.route("/config/status", methods=["GET"])
+    def config_status():
+        """Show currently loaded config file and effective settings"""
+        try:
+            cfg = get_user_config()
+            return jsonify({
+                "status": "success",
+                "config": cfg.to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.error(f"Config status error: {e}")
+            return jsonify({"status": "error", "error": {"message": str(e)}}), 500
+
+    @app.route("/config/reload", methods=["POST"])
+    def config_reload():
+        """Force config file reload without restarting the server (admin-key protected)"""
+        ok, err = _admin_check()
+        if not ok:
+            return err
+
+        try:
+            cfg = reload_user_config()
+            return jsonify({
+                "status":  "success",
+                "message": "Config reloaded",
+                "config":  cfg.to_dict(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.error(f"Config reload error: {e}")
+            return jsonify({"status": "error", "error": {"message": str(e)}}), 500
+
+    @app.errorhandler(404)
+    def not_found(error):
+        """Handle 404 errors"""
+        return (
+            jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Endpoint not found",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            }),
+            404,
+        )
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        """Handle 500 errors"""
+        logger.error(f"Internal server error: {str(error)}")
+        return (
+            jsonify({
+                "status": "error",
+                "error": {
+                    "message": "Internal server error",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            }),
+            500,
+        )
+
+'''
+ @app.route("/debug/trending-raw", methods=["GET"])
+def debug_trending_raw():
+    """Debug endpoint to see raw trending data"""
+    from src.trending_analytics import trending_engine, Country
+    raw = trending_engine.ytmusic.get_trending(region="US")
+    return jsonify({
+        "type": str(type(raw)),
+        "keys": list(raw.keys()) if isinstance(raw, dict) else "is_list",
+        "first_item": raw[0] if isinstance(raw, list) and raw else (list(raw.items())[0] if isinstance(raw, dict) else None)
+    })
+'''

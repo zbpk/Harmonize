@@ -1,0 +1,11 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Application database & sessions
+music_app.db
+current_session.json
+
+# Local music files, art caches, and custom avatars
+my_music/

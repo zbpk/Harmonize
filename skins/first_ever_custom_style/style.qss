@@ -1,0 +1,12 @@
+
+            QMainWindow { background-color: #455178; }
+            QWidget { color: #000000; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+            QTabWidget::pane { border: none; background: #b54084; border-radius: 10px; }
+            QTabBar::tab { background: #b54084; color: #000000; padding: 10px 22px; font-weight: bold; margin-right: 4px; }
+            QTabBar::tab:selected { background: #b54084; color: #cfc2c4; border-bottom: 2px solid #cfc2c4; }
+            QPushButton { background-color: #cfc2c4; color: #FFFFFF; border-radius: 18px; padding: 8px 18px; font-weight: bold; border: none; }
+            QListWidget, QTableWidget { background-color: #b54084; color: #000000; border-radius: 8px; }
+            QLineEdit, QComboBox { background-color: #b54084; border: 1px solid #cfc2c4; color: #000000; padding: 8px; border-radius: 6px; }
+            QSlider::sub-page:horizontal { background: #cfc2c4; }
+            QSlider::handle:horizontal { background: #000000; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }
+        
