@@ -47,7 +47,7 @@ BADGE_ICONS = {
 }
 
 THEMES = {
-    "Spotify Dark": """
+    "Dark Mode": """
         QMainWindow { background-color: #0d0d0d; }
         QWidget { color: #FFFFFF; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
         QTabWidget::pane { border: none; background: #121212; border-radius: 10px; }
@@ -1548,7 +1548,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.layout = QVBoxLayout(self.main_widget)
         self.layout.setContentsMargins(12, 12, 12, 12)
 
-        self.setStyleSheet(THEMES["Spotify Dark"])
+        self.setStyleSheet(THEMES["Dark Mode"])
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("<b>Theme:</b>"))
