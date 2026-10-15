@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (
     QCheckBox
 )
 
-MUSIC_FOLDER = "my_music"
-os.makedirs(MUSIC_FOLDER, exist_ok=True)
+BASE_MUSIC_FOLDER = "my_music"
+os.makedirs(BASE_MUSIC_FOLDER, exist_ok=True)
 ALLOWED_EXTENSIONS = ('.wav', '.mp3', '.flac', '.aac', '.m4a', '.ogg', '.aiff', '.wma')
 SESSION_FILE = "current_session.json"
 LOGO_FILE = "logo.png"
@@ -118,133 +118,98 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                      (
+                          id SERIAL PRIMARY KEY,
+                          username TEXT,
+                          password TEXT,
+                          status TEXT,
+                          last_seen TEXT,
+                          profile_pic_path TEXT,
+                          bio TEXT,
+                          status_message TEXT,
+                          favorite_genre TEXT,
+                          badge TEXT
+                      )''')
+
+    # Automatically clean up pre-existing case-insensitive duplicate users before index creation
+    cursor.execute('''DELETE FROM users 
+                      WHERE id NOT IN (
+                          SELECT MIN(id) 
+                          FROM users 
+                          GROUP BY LOWER(username)
+                      )''')
+
+    # Enforce case-insensitive unique username index
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS users_lower_username_idx 
+                      ON users (LOWER(username))''')
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS songs
                       (
-                          id
-                          SERIAL
-                          PRIMARY
-                          KEY,
-                          title
-                          TEXT,
-                          artist
-                          TEXT,
-                          album
-                          TEXT,
-                          year
-                          TEXT,
-                          theme
-                          TEXT,
-                          source_tag
-                          TEXT,
-                          duration
-                          INTEGER,
-                          file_path
-                          TEXT,
-                          lyrics
-                          TEXT,
-                          album_art_path
-                          TEXT
+                          id SERIAL PRIMARY KEY,
+                          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                          title TEXT,
+                          artist TEXT,
+                          album TEXT,
+                          year TEXT,
+                          theme TEXT,
+                          source_tag TEXT,
+                          duration INTEGER,
+                          file_path TEXT,
+                          lyrics TEXT,
+                          album_art_path TEXT
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS listening_history
                       (
-                          id
-                          SERIAL
-                          PRIMARY
-                          KEY,
-                          song_id
-                          INTEGER,
-                          duration_played
-                          INTEGER
+                          id SERIAL PRIMARY KEY,
+                          song_id INTEGER REFERENCES songs(id) ON DELETE CASCADE,
+                          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                          duration_played INTEGER
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS playlists
                       (
-                          id
-                          SERIAL
-                          PRIMARY
-                          KEY,
-                          name
-                          TEXT,
-                          creator
-                          TEXT
+                          id SERIAL PRIMARY KEY,
+                          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                          name TEXT,
+                          creator TEXT
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS playlist_songs
-    (
-        playlist_id
-        INTEGER,
-        song_id
-        INTEGER,
-        PRIMARY
-        KEY
                       (
-        playlist_id,
-        song_id
-                      )
-        )''')
+                          playlist_id INTEGER REFERENCES playlists(id) ON DELETE CASCADE,
+                          song_id INTEGER REFERENCES songs(id) ON DELETE CASCADE,
+                          PRIMARY KEY (playlist_id, song_id)
+                      )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS favorites
                       (
-                          song_id
-                          INTEGER
-                          PRIMARY
-                          KEY
-                      )''')
-
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users
-                      (
-                          id
-                          SERIAL
-                          PRIMARY
-                          KEY,
-                          username
-                          TEXT
-                          UNIQUE,
-                          password
-                          TEXT,
-                          status
-                          TEXT,
-                          last_seen
-                          TEXT,
-                          profile_pic_path
-                          TEXT,
-                          bio
-                          TEXT,
-                          status_message
-                          TEXT,
-                          favorite_genre
-                          TEXT,
-                          badge
-                          TEXT
+                          song_id INTEGER REFERENCES songs(id) ON DELETE CASCADE,
+                          user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                          PRIMARY KEY (song_id, user_id)
                       )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS follows
-    (
-        follower_username
-        TEXT,
-        following_username
-        TEXT,
-        PRIMARY
-        KEY
                       (
-        follower_username,
-        following_username
-                      )
-        )''')
+                          follower_username TEXT,
+                          following_username TEXT,
+                          PRIMARY KEY (follower_username, following_username)
+                      )''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS custom_themes
                       (
-                          id
-                          SERIAL
-                          PRIMARY
-                          KEY,
-                          name
-                          TEXT
-                          UNIQUE,
-                          qss
-                          TEXT
+                          id SERIAL PRIMARY KEY,
+                          name TEXT UNIQUE,
+                          qss TEXT
                       )''')
+
+    # Ensure user_id columns exist if tables were created previously without them
+    for tbl in ['songs', 'listening_history', 'playlists', 'favorites']:
+        try:
+            cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;")
+        except Exception:
+            pass
 
     conn.commit()
     cursor.close()
@@ -252,6 +217,12 @@ def init_db():
 
 
 init_db()
+
+
+def get_user_folder(user_id):
+    folder = os.path.join(BASE_MUSIC_FOLDER, f"user_{user_id}")
+    os.makedirs(folder, exist_ok=True)
+    return folder
 
 
 def parse_metadata_safely(file_path):
@@ -270,7 +241,7 @@ def parse_metadata_safely(file_path):
     return title, artist, album, year, theme, tag
 
 
-def fetch_lastfm_art(artist, album_or_track):
+def fetch_lastfm_art(artist, album_or_track, user_id):
     try:
         url = f"http://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key={LASTFM_API_KEY}&artist={artist}&album={album_or_track}&format=json"
         res = requests.get(url, timeout=4).json()
@@ -279,7 +250,7 @@ def fetch_lastfm_art(artist, album_or_track):
             if img.get('#text'):
                 img_res = requests.get(img['#text'], timeout=4)
                 if img_res.status_code == 200:
-                    art_dir = os.path.join(MUSIC_FOLDER, "art_cache")
+                    art_dir = os.path.join(get_user_folder(user_id), "art_cache")
                     os.makedirs(art_dir, exist_ok=True)
                     art_file = os.path.join(art_dir, f"{artist}_{album_or_track}.jpg".replace(" ", "_"))
                     with open(art_file, "wb") as f:
@@ -290,7 +261,7 @@ def fetch_lastfm_art(artist, album_or_track):
     return None
 
 
-def check_badge_unlocked(badge_key, username=""):
+def check_badge_unlocked(badge_key, username="", user_id=None):
     uname_lower = username.lower()
 
     if badge_key == "owner":
@@ -309,26 +280,35 @@ def check_badge_unlocked(badge_key, username=""):
         badges_str = row['badge'] if row and row['badge'] else ""
         return "tester" in [b.strip().lower() for b in badges_str.split(",")]
 
+    if user_id is None:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE username=%s", (username,))
+        r = c.fetchone()
+        user_id = r['id'] if r else 0
+        c.close()
+        conn.close()
+
     conn = get_db_connection()
     c = conn.cursor()
 
-    c.execute("SELECT COUNT(song_id) FROM listening_history")
+    c.execute("SELECT COUNT(song_id) FROM listening_history WHERE user_id=%s", (user_id,))
     total_listened = c.fetchone()['count'] or 0
 
-    c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
+    c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history WHERE user_id=%s", (user_id,))
     unique_listened = c.fetchone()['count'] or 0
 
-    c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+    c.execute("SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%')", (user_id,))
     downloads_count = c.fetchone()['count'] or 0
 
     c.execute(
-        "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+        "SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%')", (user_id,))
     imports_count = c.fetchone()['count'] or 0
 
-    c.execute("SELECT COUNT(*) FROM favorites")
+    c.execute("SELECT COUNT(*) FROM favorites WHERE user_id=%s", (user_id,))
     liked_count = c.fetchone()['count'] or 0
 
-    c.execute("SELECT COUNT(DISTINCT album) FROM songs")
+    c.execute("SELECT COUNT(DISTINCT album) FROM songs WHERE user_id=%s", (user_id,))
     albums_count = c.fetchone()['count'] or 0
     c.close()
     conn.close()
@@ -356,7 +336,7 @@ def check_badge_unlocked(badge_key, username=""):
     return True
 
 
-def format_badge_display(badge_str, username=""):
+def format_badge_display(badge_str, username="", user_id=None):
     if not badge_str:
         return BADGE_ICONS["member"]
 
@@ -367,7 +347,7 @@ def format_badge_display(badge_str, username=""):
 
     formatted_badges = []
     for p in parts:
-        if check_badge_unlocked(p, username):
+        if check_badge_unlocked(p, username, user_id):
             icon_str = BADGE_ICONS.get(p, None)
             if not icon_str:
                 for k, v in BADGE_ICONS.items():
@@ -413,9 +393,10 @@ class SearchWorker(QThread):
 class BackgroundFetchWorker(QThread):
     data_ready = pyqtSignal(list)
 
-    def __init__(self, query_type, extra_arg=None):
+    def __init__(self, query_type, user_id=None, extra_arg=None):
         super().__init__()
         self.query_type = query_type
+        self.user_id = user_id
         self.extra_arg = extra_arg
 
     def run(self):
@@ -424,9 +405,9 @@ class BackgroundFetchWorker(QThread):
             conn = get_db_connection()
             c = conn.cursor()
 
-            if self.query_type == "albums":
+            if self.query_type == "albums" and self.user_id:
                 c.execute(
-                    "SELECT album, artist, year, theme, album_art_path, COUNT(*) FROM songs GROUP BY album, artist, year, theme, album_art_path")
+                    "SELECT album, artist, year, theme, album_art_path, COUNT(*) FROM songs WHERE user_id=%s GROUP BY album, artist, year, theme, album_art_path", (self.user_id,))
                 self.data_ready.emit(c.fetchall())
             elif self.query_type == "social":
                 c.execute("SELECT id, username, status, last_seen, status_message, badge FROM users ORDER BY id ASC")
@@ -440,26 +421,26 @@ class BackgroundFetchWorker(QThread):
                     following_count = c.fetchone()['count'] or 0
                     results.append({**row, "followers": f_count, "following": following_count})
                 self.data_ready.emit(results)
-            elif self.query_type == "stats":
-                c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
+            elif self.query_type == "stats" and self.user_id:
+                c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history WHERE user_id=%s", (self.user_id,))
                 res = c.fetchone()
                 c.execute(
-                    "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+                    "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id WHERE h.user_id=%s GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1", (self.user_id,))
                 fav_song = c.fetchone()
                 c.execute(
-                    "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+                    "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id WHERE h.user_id=%s GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1", (self.user_id,))
                 fav_art = c.fetchone()
                 c.execute(
-                    "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+                    "SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%')", (self.user_id,))
                 dl_count = c.fetchone()['count'] or 0
                 c.execute(
-                    "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+                    "SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%')", (self.user_id,))
                 imp_count = c.fetchone()['count'] or 0
-                c.execute("SELECT COUNT(DISTINCT album) FROM songs")
+                c.execute("SELECT COUNT(DISTINCT album) FROM songs WHERE user_id=%s", (self.user_id,))
                 albums_count = c.fetchone()['count'] or 0
-                c.execute("SELECT COUNT(*) FROM favorites")
+                c.execute("SELECT COUNT(*) FROM favorites WHERE user_id=%s", (self.user_id,))
                 fav_cnt = c.fetchone()['count'] or 0
-                c.execute("SELECT COUNT(*) FROM playlists")
+                c.execute("SELECT COUNT(*) FROM playlists WHERE user_id=%s", (self.user_id,))
                 pl_cnt = c.fetchone()['count'] or 0
 
                 self.data_ready.emit([{
@@ -483,15 +464,17 @@ class BackgroundFetchWorker(QThread):
 class DownloadWorker(QThread):
     finished = pyqtSignal(str, str)
 
-    def __init__(self, url, title, is_album=False):
+    def __init__(self, url, title, user_id, is_album=False):
         super().__init__()
         self.url = url
         self.title = title
+        self.user_id = user_id
         self.is_album = is_album
 
     def run(self):
-        output_template = os.path.join(MUSIC_FOLDER, "%(playlist_title,album,uploader)s",
-                                       "%(title)s.%(ext)s") if self.is_album else os.path.join(MUSIC_FOLDER,
+        user_folder = get_user_folder(self.user_id)
+        output_template = os.path.join(user_folder, "%(playlist_title,album,uploader)s",
+                                       "%(title)s.%(ext)s") if self.is_album else os.path.join(user_folder,
                                                                                                "%(title)s.%(ext)s")
         try:
             cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "-o", output_template, self.url]
@@ -606,6 +589,17 @@ class AuthWindow(QDialog):
             c = conn.cursor()
 
             if self.is_signup:
+                c.execute("SELECT COUNT(*) FROM users WHERE LOWER(username) = LOWER(%s)", (u,))
+                exists = c.fetchone()['count'] > 0
+
+                if exists:
+                    conn.rollback()
+                    c.close()
+                    conn.close()
+                    QMessageBox.warning(self, "Username Taken",
+                                        f"The username '{u}' (or a case variant of it) is already taken. Please choose a different unique username.")
+                    return
+
                 c.execute("SELECT COUNT(*) FROM users")
                 user_count = c.fetchone()['count'] or 0
 
@@ -652,9 +646,10 @@ class AuthWindow(QDialog):
 
 
 class ProfileEditorDialog(QDialog):
-    def __init__(self, username, parent=None):
+    def __init__(self, username, user_id, parent=None):
         super().__init__(parent)
         self.username = username
+        self.user_id = user_id
         self.setWindowTitle(f"Manage Profile: {username}")
         self.setFixedSize(460, 560)
         if os.path.exists(LOGO_FILE):
@@ -690,7 +685,7 @@ class ProfileEditorDialog(QDialog):
 
         all_possible_badges = list(BADGE_ICONS.keys())
         for b_key in all_possible_badges:
-            is_unlocked = check_badge_unlocked(b_key, username)
+            is_unlocked = check_badge_unlocked(b_key, username, self.user_id)
             cb = QCheckBox(BADGE_ICONS[b_key])
 
             if not is_unlocked:
@@ -732,7 +727,7 @@ class ProfileEditorDialog(QDialog):
     def save_profile(self):
         selected_badges = []
         for b_key, cb in self.badge_checkboxes.items():
-            if cb.isChecked() and check_badge_unlocked(b_key, self.username):
+            if cb.isChecked() and check_badge_unlocked(b_key, self.username, self.user_id):
                 selected_badges.append(b_key)
 
         if self.username.lower() == OWNER_USERNAME.lower() and "owner" not in selected_badges:
@@ -830,8 +825,9 @@ QListWidget, QTableWidget {
 
 
 class PlaylistManagerDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, user_id, parent=None):
         super().__init__(parent)
+        self.user_id = user_id
         self.setWindowTitle("Manage Playlists")
         self.setFixedSize(400, 350)
         if os.path.exists(LOGO_FILE):
@@ -861,7 +857,7 @@ class PlaylistManagerDialog(QDialog):
         self.list_widget.clear()
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, name FROM playlists")
+        c.execute("SELECT id, name FROM playlists WHERE user_id=%s", (self.user_id,))
         for r in c.fetchall():
             item = QListWidgetItem(f"📁 {r['name']} [ID:{r['id']}]")
             item.setData(Qt.ItemDataRole.UserRole, r['id'])
@@ -877,7 +873,7 @@ class PlaylistManagerDialog(QDialog):
             if ok and new_name.strip():
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("UPDATE playlists SET name=%s WHERE id=%s", (new_name.strip(), p_id))
+                c.execute("UPDATE playlists SET name=%s WHERE id=%s AND user_id=%s", (new_name.strip(), p_id, self.user_id))
                 conn.commit()
                 c.close()
                 conn.close()
@@ -896,7 +892,7 @@ class PlaylistManagerDialog(QDialog):
             if confirm == QMessageBox.StandardButton.Yes:
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("DELETE FROM playlists WHERE id=%s", (p_id,))
+                c.execute("DELETE FROM playlists WHERE id=%s AND user_id=%s", (p_id, self.user_id))
                 c.execute("DELETE FROM playlist_songs WHERE playlist_id=%s", (p_id,))
                 conn.commit()
                 c.close()
@@ -907,9 +903,10 @@ class PlaylistManagerDialog(QDialog):
 
 
 class SongEditorDialog(QDialog):
-    def __init__(self, song_id, parent=None):
+    def __init__(self, song_id, user_id, parent=None):
         super().__init__(parent)
         self.song_id = song_id
+        self.user_id = user_id
         self.setWindowTitle("Edit Audio Metadata & Artwork")
         self.setFixedSize(420, 440)
         if os.path.exists(LOGO_FILE):
@@ -958,7 +955,7 @@ class SongEditorDialog(QDialog):
 
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT title, artist, album, theme, source_tag, album_art_path FROM songs WHERE id=%s", (song_id,))
+        c.execute("SELECT title, artist, album, theme, source_tag, album_art_path FROM songs WHERE id=%s AND user_id=%s", (song_id, self.user_id))
         row = c.fetchone()
         c.close()
         conn.close()
@@ -1004,7 +1001,7 @@ class SongEditorDialog(QDialog):
             self, "Select Album Artwork", "", "Image Files (*.png *.jpg *.jpeg *.webp)"
         )
         if f_path:
-            art_dir = os.path.join(MUSIC_FOLDER, "art_cache")
+            art_dir = os.path.join(get_user_folder(self.user_id), "art_cache")
             os.makedirs(art_dir, exist_ok=True)
             dest = os.path.join(art_dir, f"custom_{self.song_id}{os.path.splitext(f_path)[1]}")
             shutil.copy(f_path, dest)
@@ -1026,8 +1023,8 @@ class SongEditorDialog(QDialog):
             conn = get_db_connection()
             c = conn.cursor()
             c.execute(
-                "UPDATE songs SET title=%s, artist=%s, album=%s, theme=%s, source_tag=%s, album_art_path=%s WHERE id=%s",
-                (t, a, alb, th, tag, self.art_path_val, self.song_id)
+                "UPDATE songs SET title=%s, artist=%s, album=%s, theme=%s, source_tag=%s, album_art_path=%s WHERE id=%s AND user_id=%s",
+                (t, a, alb, th, tag, self.art_path_val, self.song_id, self.user_id)
             )
             conn.commit()
             c.close()
@@ -1059,6 +1056,7 @@ class UserProfileDialog(QDialog):
                   (username,))
         user_row = c.fetchone()
         user_id = user_row['id'] if user_row else 1
+        self.user_id = user_id
         status = user_row['status'] if user_row and user_row['status'] else "Active Listener"
         status_msg = user_row['status_message'] if user_row and user_row['status_message'] else "No status message set."
         bio = user_row['bio'] if user_row and user_row['bio'] else "No bio available."
@@ -1073,7 +1071,7 @@ class UserProfileDialog(QDialog):
         c.close()
         conn.close()
 
-        formatted_badges = format_badge_display(badge_raw, username)
+        formatted_badges = format_badge_display(badge_raw, username, user_id)
 
         header_layout = QHBoxLayout()
 
@@ -1173,31 +1171,31 @@ class UserProfileDialog(QDialog):
 
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history")
+        c.execute("SELECT COUNT(DISTINCT song_id) FROM listening_history WHERE user_id=%s", (user_id,))
         hist_res = c.fetchone()
         unique_songs = hist_res['count'] or 0
 
         c.execute(
-            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+            "SELECT s.title FROM listening_history h JOIN songs s ON h.song_id = s.id WHERE h.user_id=%s GROUP BY s.id, s.title ORDER BY COUNT(h.song_id) DESC LIMIT 1", (user_id,))
         fav_song_res = c.fetchone()
         fav_song = fav_song_res['title'] if fav_song_res else "None"
 
         c.execute(
-            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1")
+            "SELECT s.artist FROM listening_history h JOIN songs s ON h.song_id = s.id WHERE h.user_id=%s GROUP BY s.artist ORDER BY COUNT(h.song_id) DESC LIMIT 1", (user_id,))
         fav_art_res = c.fetchone()
         fav_artist = fav_art_res['artist'] if fav_art_res else "None"
 
-        c.execute("SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%'")
+        c.execute("SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Catalog%%' OR source_tag LIKE '%%Download%%')", (user_id,))
         downloaded_count = c.fetchone()['count'] or 0
 
         c.execute(
-            "SELECT COUNT(*) FROM songs WHERE source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%'")
+            "SELECT COUNT(*) FROM songs WHERE user_id=%s AND (source_tag LIKE '%%Upload%%' OR source_tag LIKE '%%Import%%' OR source_tag LIKE '%%Digital%%')", (user_id,))
         imported_count = c.fetchone()['count'] or 0
 
-        c.execute("SELECT COUNT(*) FROM favorites")
+        c.execute("SELECT COUNT(*) FROM favorites WHERE user_id=%s", (user_id,))
         liked_count = c.fetchone()['count'] or 0
 
-        c.execute("SELECT COUNT(DISTINCT album) FROM songs")
+        c.execute("SELECT COUNT(DISTINCT album) FROM songs WHERE user_id=%s", (user_id,))
         total_albums = c.fetchone()['count'] or 0
         c.close()
         conn.close()
@@ -1286,7 +1284,7 @@ class UserProfileDialog(QDialog):
         self.avatar_btn.setIcon(QIcon())
 
     def open_profile_editor(self):
-        editor = ProfileEditorDialog(self.username, self)
+        editor = ProfileEditorDialog(self.username, self.user_id, self)
         if editor.exec():
             self.load_avatar_image()
 
@@ -1359,7 +1357,7 @@ class UserProfileDialog(QDialog):
                 square_pix = cropped.scaled(120, 120, Qt.AspectRatioMode.IgnoreAspectRatio,
                                             Qt.TransformationMode.SmoothTransformation)
 
-                pfp_dir = os.path.join(MUSIC_FOLDER, "avatars")
+                pfp_dir = os.path.join(get_user_folder(self.user_id), "avatars")
                 os.makedirs(pfp_dir, exist_ok=True)
                 dest_path = os.path.join(pfp_dir, f"{self.username}_pfp.png")
                 square_pix.save(dest_path, "PNG")
@@ -1483,7 +1481,7 @@ class CoverCardWidget(QFrame):
 
         pix = QPixmap(art_path) if art_path and os.path.exists(art_path) else QPixmap()
         if pix.isNull():
-            art_p = fetch_lastfm_art(artist, album)
+            art_p = fetch_lastfm_art(artist, album, parent_app.user_id)
             if art_p: pix = QPixmap(art_p)
 
         if not pix.isNull():
@@ -1506,6 +1504,15 @@ class SpotifyUniqueApp(QMainWindow):
     def __init__(self, current_user="Guest"):
         super().__init__()
         self.current_user = current_user
+
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE username=%s", (self.current_user,))
+        row = c.fetchone()
+        self.user_id = row['id'] if row else 1
+        c.close()
+        conn.close()
+
         self.setWindowTitle(f"Harmonize (Logged in as: {current_user})")
         self.setGeometry(100, 100, 1280, 820)
         self.setAcceptDrops(True)
@@ -1565,16 +1572,15 @@ class SpotifyUniqueApp(QMainWindow):
 
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, badge FROM users WHERE username=%s", (self.current_user,))
+        c.execute("SELECT badge FROM users WHERE username=%s", (self.current_user,))
         u_row = c.fetchone()
-        u_id = u_row['id'] if u_row else 1
         u_badge_raw = u_row['badge'] if u_row and u_row['badge'] else "member"
         c.close()
         conn.close()
 
-        formatted_top_badge = format_badge_display(u_badge_raw, self.current_user)
+        formatted_top_badge = format_badge_display(u_badge_raw, self.current_user, self.user_id)
 
-        self.profile_top_btn = QPushButton(f"👤 {self.current_user} #{u_id} [{formatted_top_badge}]")
+        self.profile_top_btn = QPushButton(f"👤 {self.current_user} #{self.user_id} [{formatted_top_badge}]")
         self.profile_top_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.profile_top_btn.setStyleSheet(
             "QPushButton { background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; border-radius: 12px; padding: 4px 12px; font-weight: bold; } QPushButton:hover { background-color: #0284c7; color: white; }")
@@ -1613,7 +1619,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.update_presence_heartbeat()
 
     def restore_playback_state(self):
-        state_file = "playback_state.json"
+        state_file = f"playback_state_user_{self.user_id}.json"
         if os.path.exists(state_file):
             try:
                 with open(state_file, "r") as f:
@@ -1629,7 +1635,7 @@ class SpotifyUniqueApp(QMainWindow):
                     if song_id:
                         conn = get_db_connection()
                         c = conn.cursor()
-                        c.execute("SELECT id FROM songs WHERE id = %s", (song_id,))
+                        c.execute("SELECT id FROM songs WHERE id = %s AND user_id = %s", (song_id, self.user_id))
                         if c.fetchone():
                             self.play_song_by_id(song_id, start_position=position_ms, auto_play=False)
                         c.close()
@@ -1638,7 +1644,7 @@ class SpotifyUniqueApp(QMainWindow):
                 pass
 
     def save_playback_state(self):
-        state_file = "playback_state.json"
+        state_file = f"playback_state_user_{self.user_id}.json"
         try:
             data = {
                 "song_id": self.current_song_id,
@@ -1830,11 +1836,10 @@ class SpotifyUniqueApp(QMainWindow):
 
         menu = QMenu(self)
 
-        # Playlist Submenu
         playlist_menu = menu.addMenu("📁 Add to Playlist")
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, name FROM playlists")
+        c.execute("SELECT id, name FROM playlists WHERE user_id=%s", (self.user_id,))
         playlists = c.fetchall()
         c.close()
         conn.close()
@@ -1856,7 +1861,7 @@ class SpotifyUniqueApp(QMainWindow):
 
         action = menu.exec(self.song_list_widget.mapToGlobal(pos))
         if action == edit_action:
-            dlg = SongEditorDialog(song_id, self)
+            dlg = SongEditorDialog(song_id, self.user_id, self)
             if dlg.exec():
                 self.load_songs_to_ui()
         elif action == del_action:
@@ -1865,16 +1870,16 @@ class SpotifyUniqueApp(QMainWindow):
             if confirm == QMessageBox.StandardButton.Yes:
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("SELECT file_path FROM songs WHERE id=%s", (song_id,))
+                c.execute("SELECT file_path FROM songs WHERE id=%s AND user_id=%s", (song_id, self.user_id))
                 row = c.fetchone()
                 if row and row['file_path'] and os.path.exists(row['file_path']):
                     try:
                         os.remove(row['file_path'])
                     except Exception:
                         pass
-                c.execute("DELETE FROM songs WHERE id=%s", (song_id,))
+                c.execute("DELETE FROM songs WHERE id=%s AND user_id=%s", (song_id, self.user_id))
                 c.execute("DELETE FROM playlist_songs WHERE song_id=%s", (song_id,))
-                c.execute("DELETE FROM favorites WHERE song_id=%s", (song_id,))
+                c.execute("DELETE FROM favorites WHERE song_id=%s AND user_id=%s", (song_id, self.user_id))
                 conn.commit()
                 c.close()
                 conn.close()
@@ -1899,7 +1904,7 @@ class SpotifyUniqueApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to add song to playlist: {str(e)}")
 
     def open_playlist_manager(self):
-        dlg = PlaylistManagerDialog(self)
+        dlg = PlaylistManagerDialog(self.user_id, self)
         dlg.exec()
 
     def init_coverflow_tab(self):
@@ -2053,7 +2058,7 @@ class SpotifyUniqueApp(QMainWindow):
 
     def load_social_users_async(self):
         filter_mode = self.social_filter_combo.currentText() if hasattr(self, 'social_filter_combo') else "All Users"
-        self.bg_worker = BackgroundFetchWorker("social", filter_mode)
+        self.bg_worker = BackgroundFetchWorker("social", self.user_id, filter_mode)
         self.bg_worker.parent_username = self.current_user
         self.bg_worker.data_ready.connect(self.populate_social_ui)
         self.bg_worker.start()
@@ -2073,7 +2078,7 @@ class SpotifyUniqueApp(QMainWindow):
             followers_count = row.get('followers', 0)
             following_count = row.get('following', 0)
 
-            formatted_badge = format_badge_display(badge_raw, u)
+            formatted_badge = format_badge_display(badge_raw, u, uid)
 
             dot = "⚫"
             if last_seen_raw:
@@ -2168,7 +2173,6 @@ class SpotifyUniqueApp(QMainWindow):
 
         controls = QHBoxLayout()
 
-        # Fixed control buttons with zero padding and explicit sizing to eliminate visual clipping
         self.shuffle_btn = QPushButton("🔀")
         self.shuffle_btn.setFixedSize(38, 38)
         self.shuffle_btn.setStyleSheet(
@@ -2259,7 +2263,7 @@ class SpotifyUniqueApp(QMainWindow):
             self.load_social_users_async()
 
     def load_cover_flow_async(self):
-        self.bg_worker = BackgroundFetchWorker("albums")
+        self.bg_worker = BackgroundFetchWorker("albums", self.user_id)
         self.bg_worker.data_ready.connect(self.populate_cover_flow)
         self.bg_worker.start()
 
@@ -2298,6 +2302,7 @@ class SpotifyUniqueApp(QMainWindow):
             tag_name, ok5 = QInputDialog.getText(self, "Custom Album", "Enter Source Tag:")
 
             if ok1 and alb_name:
+                user_folder = get_user_folder(self.user_id)
                 audio_files = []
                 for root, _, files in os.walk(folder):
                     for file in files:
@@ -2308,7 +2313,7 @@ class SpotifyUniqueApp(QMainWindow):
                 cursor = conn.cursor()
                 for f_path in audio_files:
                     filename = os.path.basename(f_path)
-                    dest = os.path.join(MUSIC_FOLDER, filename)
+                    dest = os.path.join(user_folder, filename)
                     shutil.copy(f_path, dest)
 
                     title = os.path.splitext(filename)[0]
@@ -2316,9 +2321,9 @@ class SpotifyUniqueApp(QMainWindow):
                     dur = int(audio.info.length) if audio and hasattr(audio, 'info') else 0
 
                     cursor.execute(
-                        """INSERT INTO songs (title, artist, album, year, theme, source_tag, duration, file_path)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (title, art_name or "Unknown Artist", alb_name, yr_name or "2026", thm_name or "Custom",
+                        """INSERT INTO songs (user_id, title, artist, album, year, theme, source_tag, duration, file_path)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (self.user_id, title, art_name or "Unknown Artist", alb_name, yr_name or "2026", thm_name or "Custom",
                          tag_name or "Upload", dur, dest))
                 conn.commit()
                 cursor.close()
@@ -2328,24 +2333,25 @@ class SpotifyUniqueApp(QMainWindow):
                                         f"Uploaded album '{alb_name}' with {len(audio_files)} tracks!")
 
     def process_import_files(self, file_paths):
+        user_folder = get_user_folder(self.user_id)
         conn = get_db_connection()
         cursor = conn.cursor()
         added = 0
         for path in file_paths:
             if path.lower().endswith(ALLOWED_EXTENSIONS):
                 fname = os.path.basename(path)
-                dest = os.path.join(MUSIC_FOLDER, fname)
+                dest = os.path.join(user_folder, fname)
                 shutil.copy(path, dest)
                 title, artist, album, year, theme, tag = parse_metadata_safely(dest)
                 audio = File(dest, easy=True)
                 dur = int(audio.info.length) if audio and hasattr(audio, 'info') else 0
 
-                cursor.execute("SELECT id FROM songs WHERE file_path = %s", (dest,))
+                cursor.execute("SELECT id FROM songs WHERE file_path = %s AND user_id = %s", (dest, self.user_id))
                 if not cursor.fetchone():
                     cursor.execute(
-                        """INSERT INTO songs (title, artist, album, year, theme, source_tag, duration, file_path)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-                        (title, artist, album, year, theme, tag, dur, dest))
+                        """INSERT INTO songs (user_id, title, artist, album, year, theme, source_tag, duration, file_path)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (self.user_id, title, artist, album, year, theme, tag, dur, dest))
                     added += 1
         conn.commit()
         cursor.close()
@@ -2358,8 +2364,8 @@ class SpotifyUniqueApp(QMainWindow):
             try:
                 conn = get_db_connection()
                 c = conn.cursor()
-                c.execute("INSERT INTO listening_history (song_id, duration_played) VALUES (%s, %s)",
-                          (self.current_song_id, self.accumulated_play_time))
+                c.execute("INSERT INTO listening_history (song_id, user_id, duration_played) VALUES (%s, %s, %s)",
+                          (self.current_song_id, self.user_id, self.accumulated_play_time))
                 conn.commit()
                 c.close()
                 conn.close()
@@ -2439,8 +2445,8 @@ class SpotifyUniqueApp(QMainWindow):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT title, artist, album, duration, lyrics, album_art_path, file_path FROM songs WHERE id = %s",
-            (song_id,))
+            "SELECT title, artist, album, duration, lyrics, album_art_path, file_path FROM songs WHERE id = %s AND user_id = %s",
+            (song_id, self.user_id))
         song = cursor.fetchone()
 
         if song:
@@ -2477,7 +2483,7 @@ class SpotifyUniqueApp(QMainWindow):
 
                 pix = QPixmap(art_path) if art_path and os.path.exists(art_path) else QPixmap()
                 if pix.isNull():
-                    art_p = fetch_lastfm_art(artist, album)
+                    art_p = fetch_lastfm_art(artist, album, self.user_id)
                     if art_p: pix = QPixmap(art_p)
 
                 if not pix.isNull():
@@ -2494,7 +2500,7 @@ class SpotifyUniqueApp(QMainWindow):
                 if not cached_lyrics:
                     cached_lyrics = self.fetch_lyrics_from_lrclib(title, artist,
                                                                   duration) or "Synced lyrics not found."
-                    cursor.execute("UPDATE songs SET lyrics = %s WHERE id = %s", (cached_lyrics, song_id))
+                    cursor.execute("UPDATE songs SET lyrics = %s WHERE id = %s AND user_id = %s", (cached_lyrics, song_id, self.user_id))
                     conn.commit()
 
                 if "[" in cached_lyrics and ":" in cached_lyrics:
@@ -2552,7 +2558,7 @@ class SpotifyUniqueApp(QMainWindow):
         if ok and name.strip():
             conn = get_db_connection()
             c = conn.cursor()
-            c.execute("INSERT INTO playlists (name, creator) VALUES (%s, %s)", (name.strip(), self.current_user))
+            c.execute("INSERT INTO playlists (user_id, name, creator) VALUES (%s, %s, %s)", (self.user_id, name.strip(), self.current_user))
             conn.commit()
             c.close()
             conn.close()
@@ -2562,7 +2568,7 @@ class SpotifyUniqueApp(QMainWindow):
         self.playlist_list_widget.clear()
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, name FROM playlists")
+        c.execute("SELECT id, name FROM playlists WHERE user_id=%s", (self.user_id,))
         for r in c.fetchall():
             self.playlist_list_widget.addItem(f"📁 {r['name']} [ID:{r['id']}]")
         c.close()
@@ -2572,7 +2578,7 @@ class SpotifyUniqueApp(QMainWindow):
         if not self.current_song_id: return
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT song_id FROM favorites WHERE song_id=%s", (self.current_song_id,))
+        c.execute("SELECT song_id FROM favorites WHERE song_id=%s AND user_id=%s", (self.current_song_id, self.user_id))
         is_fav = c.fetchone() is not None
         c.close()
         conn.close()
@@ -2587,11 +2593,11 @@ class SpotifyUniqueApp(QMainWindow):
         if not self.current_song_id: return
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT song_id FROM favorites WHERE song_id=%s", (self.current_song_id,))
+        c.execute("SELECT song_id FROM favorites WHERE song_id=%s AND user_id=%s", (self.current_song_id, self.user_id))
         if c.fetchone():
-            c.execute("DELETE FROM favorites WHERE song_id=%s", (self.current_song_id,))
+            c.execute("DELETE FROM favorites WHERE song_id=%s AND user_id=%s", (self.current_song_id, self.user_id))
         else:
-            c.execute("INSERT INTO favorites (song_id) VALUES (%s) ON CONFLICT DO NOTHING", (self.current_song_id,))
+            c.execute("INSERT INTO favorites (song_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (self.current_song_id, self.user_id))
         conn.commit()
         c.close()
         conn.close()
@@ -2625,7 +2631,7 @@ class SpotifyUniqueApp(QMainWindow):
     def download_song(self, row, is_album):
         song = self.global_search_results[row]
         self.download_overlay = DownloadOverlayDialog(song["title"], self)
-        self.download_worker = DownloadWorker(song["url"], song["title"], is_album)
+        self.download_worker = DownloadWorker(song["url"], song["title"], self.user_id, is_album)
         self.download_worker.finished.connect(self.handle_download_finished)
         self.download_worker.start()
         self.download_overlay.exec()
@@ -2633,8 +2639,9 @@ class SpotifyUniqueApp(QMainWindow):
     def handle_download_finished(self, title, status):
         if hasattr(self, 'download_overlay'): self.download_overlay.close()
         if status == "success":
+            user_folder = get_user_folder(self.user_id)
             self.process_import_files(
-                [os.path.join(MUSIC_FOLDER, f) for f in os.listdir(MUSIC_FOLDER) if f.endswith(ALLOWED_EXTENSIONS)])
+                [os.path.join(user_folder, f) for f in os.listdir(user_folder) if f.endswith(ALLOWED_EXTENSIONS)])
             QMessageBox.information(self, "Success", f"Downloaded '{title}' successfully!")
 
     def load_songs_to_ui(self, artist_filter=None, album_filter=None):
@@ -2647,7 +2654,7 @@ class SpotifyUniqueApp(QMainWindow):
             search_query = self.local_search_input.text().strip().lower()
         search_term = f"%{search_query}%"
 
-        cursor.execute("SELECT DISTINCT artist FROM songs ORDER BY artist ASC")
+        cursor.execute("SELECT DISTINCT artist FROM songs WHERE user_id=%s ORDER BY artist ASC", (self.user_id,))
         artists = [row['artist'] for row in cursor.fetchall()]
         self.artist_tab_combo.blockSignals(True)
         self.artist_tab_combo.clear()
@@ -2658,34 +2665,34 @@ class SpotifyUniqueApp(QMainWindow):
         songs = []
         if artist_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE artist=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY album, title ASC",
-                (artist_filter, search_term, search_term, search_term))
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE user_id=%s AND artist=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY album, title ASC",
+                (self.user_id, artist_filter, search_term, search_term, search_term))
             songs = cursor.fetchall()
         elif album_filter:
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE album=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY title ASC",
-                (album_filter, search_term, search_term, search_term))
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE user_id=%s AND album=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY title ASC",
+                (self.user_id, album_filter, search_term, search_term, search_term))
             songs = cursor.fetchall()
         elif self.current_view_mode == "All Songs":
             cursor.execute(
-                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY artist, album, title ASC",
-                (search_term, search_term, search_term))
+                "SELECT id, title, artist, album, theme, source_tag FROM songs WHERE user_id=%s AND (LOWER(title) LIKE %s OR LOWER(artist) LIKE %s OR LOWER(album) LIKE %s) ORDER BY artist, album, title ASC",
+                (self.user_id, search_term, search_term, search_term))
             songs = cursor.fetchall()
         elif self.current_view_mode == "Liked Songs":
             cursor.execute(
                 """SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag
                    FROM songs s
                             JOIN favorites f ON s.id = f.song_id
-                   WHERE (LOWER(s.title) LIKE %s OR LOWER(s.artist) LIKE %s OR LOWER(s.album) LIKE %s)""",
-                (search_term, search_term, search_term))
+                   WHERE s.user_id = %s AND f.user_id = %s AND (LOWER(s.title) LIKE %s OR LOWER(s.artist) LIKE %s OR LOWER(s.album) LIKE %s)""",
+                (self.user_id, self.user_id, search_term, search_term, search_term))
             songs = cursor.fetchall()
         elif self.current_view_mode == "Playlist" and self.current_playlist_id:
             cursor.execute("""SELECT s.id, s.title, s.artist, s.album, s.theme, s.source_tag
                               FROM songs s
                                        JOIN playlist_songs ps ON s.id = ps.song_id
-                              WHERE ps.playlist_id = %s
+                              WHERE s.user_id = %s AND ps.playlist_id = %s
                                 AND (LOWER(s.title) LIKE %s OR LOWER(s.artist) LIKE %s OR LOWER(s.album) LIKE %s)""",
-                           (self.current_playlist_id, search_term, search_term, search_term))
+                           (self.user_id, self.current_playlist_id, search_term, search_term, search_term))
             songs = cursor.fetchall()
 
             cursor.execute(
@@ -2699,11 +2706,11 @@ class SpotifyUniqueApp(QMainWindow):
                            SELECT s.title, COALESCE(COUNT(h.song_id), 0) as play_count
                            FROM playlist_songs ps
                                     JOIN songs s ON ps.song_id = s.id
-                                    LEFT JOIN listening_history h ON s.id = h.song_id
+                                    LEFT JOIN listening_history h ON s.id = h.song_id AND h.user_id = %s
                            WHERE ps.playlist_id = %s
                            GROUP BY s.id, s.title
                            ORDER BY play_count DESC
-                           """, (self.current_playlist_id,))
+                           """, (self.user_id, self.current_playlist_id))
             playlist_tracks = cursor.fetchall()
 
             if playlist_tracks:
@@ -2809,7 +2816,7 @@ class SpotifyUniqueApp(QMainWindow):
 
     def update_stats_display_lazy(self):
         if self.tabs.tabText(self.tabs.currentIndex()) == "📊 Stats":
-            self.bg_worker = BackgroundFetchWorker("stats")
+            self.bg_worker = BackgroundFetchWorker("stats", self.user_id)
             self.bg_worker.data_ready.connect(self.populate_stats_ui)
             self.bg_worker.start()
 
@@ -2819,8 +2826,9 @@ class SpotifyUniqueApp(QMainWindow):
         res = results[0]
 
         total_size_bytes = 0
-        if os.path.exists(MUSIC_FOLDER):
-            for root, _, files in os.walk(MUSIC_FOLDER):
+        user_folder = get_user_folder(self.user_id)
+        if os.path.exists(user_folder):
+            for root, _, files in os.walk(user_folder):
                 for f in files:
                     if f.lower().endswith(ALLOWED_EXTENSIONS):
                         try:
@@ -2883,12 +2891,6 @@ if __name__ == "__main__":
         if os.path.exists(SESSION_FILE):
             try:
                 os.remove(SESSION_FILE)
-            except Exception:
-                pass
-        state_file = "playback_state.json"
-        if os.path.exists(state_file):
-            try:
-                os.remove(state_file)
             except Exception:
                 pass
         for w in QApplication.topLevelWidgets():
