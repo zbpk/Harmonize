@@ -10,6 +10,10 @@ from mutagen import File
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+try:
+    from pypresence import Presence
+except ImportError:
+    Presence = None
 
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer, QSize, QRectF
 from PyQt6.QtGui import QFont, QPixmap, QColor, QPainter, QBrush, QIcon, QAction, QPainterPath
@@ -30,6 +34,7 @@ LOGO_FILE = "logo.png"
 
 OWNER_USERNAME = "sam"
 LASTFM_API_KEY = "2d0c2e36bb93160a2b0e271bf1bc9ef2"
+DISCORD_CLIENT_ID = "123456789012345678"  # Replace with a real Discord Application Client ID if desired
 
 BADGE_ICONS = {
     "owner": "👑 Owner",
@@ -50,6 +55,7 @@ THEMES = {
     "Dark Mode": """
         QMainWindow { background-color: #0d0d0d; }
         QWidget { color: #FFFFFF; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+        QDialog { background-color: #121212; color: #FFFFFF; border: 1px solid #3b82f6; border-radius: 10px; }
         QTabWidget::pane { border: none; background: #121212; border-radius: 10px; }
         QTabBar::tab { background: #121212; color: #b3b3b3; padding: 10px 22px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; }
         QTabBar::tab:hover { color: #ffffff; background: #181818; }
@@ -71,6 +77,7 @@ THEMES = {
     "Cyber Blue": """
         QMainWindow { background-color: #07090e; }
         QWidget { color: #38bdf8; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+        QDialog { background-color: #0f172a; color: #38bdf8; border: 1px solid #0284c7; border-radius: 10px; }
         QTabWidget::pane { border: none; background: #0f172a; border-radius: 10px; }
         QTabBar::tab { background: #0f172a; color: #64748b; padding: 10px 22px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; }
         QTabBar::tab:hover { color: #38bdf8; background: #1e293b; }
@@ -87,6 +94,7 @@ THEMES = {
     "Midnight Purple": """
         QMainWindow { background-color: #12081c; }
         QWidget { color: #e879f9; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }
+        QDialog { background-color: #1e102e; color: #e879f9; border: 1px solid #7e22ce; border-radius: 10px; }
         QTabWidget::pane { border: none; background: #1e102e; border-radius: 10px; }
         QTabBar::tab { background: #1e102e; color: #a855f7; padding: 10px 22px; font-weight: bold; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 4px; }
         QTabBar::tab:hover { color: #f0abfc; background: #2e1065; }
@@ -132,7 +140,6 @@ def init_db():
                           badge TEXT
                       )''')
 
-    # Automatically clean up pre-existing case-insensitive duplicate users before index creation
     cursor.execute('''DELETE FROM users 
                       WHERE id NOT IN (
                           SELECT MIN(id) 
@@ -140,7 +147,6 @@ def init_db():
                           GROUP BY LOWER(username)
                       )''')
 
-    # Enforce case-insensitive unique username index
     cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS users_lower_username_idx 
                       ON users (LOWER(username))''')
 
@@ -204,7 +210,6 @@ def init_db():
                           qss TEXT
                       )''')
 
-    # Ensure user_id columns exist if tables were created previously without them
     for tbl in ['songs', 'listening_history', 'playlists', 'favorites']:
         try:
             cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;")
@@ -373,18 +378,23 @@ class SearchWorker(QThread):
 
     def run(self):
         try:
-            cmd = ["yt-dlp", f"ytsearch10:{self.query} audio", "--dump-json", "--no-playlist", "--skip-download"]
+            # Fixed yt-dlp search flag parsing syntax & output collection
+            cmd = ["yt-dlp", f"ytsearch10:{self.query}", "--dump-json", "--no-playlist", "--flat-playlist"]
             res = subprocess.run(cmd, capture_output=True, text=True, check=True)
             songs = []
             for line in res.stdout.strip().split("\n"):
                 if line:
-                    d = json.loads(line)
-                    songs.append({
-                        "title": d.get("title", "Unknown Title"),
-                        "artist": d.get("uploader", "Unknown Artist"),
-                        "url": d.get("webpage_url"),
-                        "duration": d.get("duration", 0)
-                    })
+                    try:
+                        d = json.loads(line)
+                        url = d.get("webpage_url") or f"https://www.youtube.com/watch?v={d.get('id')}"
+                        songs.append({
+                            "title": d.get("title", "Unknown Title"),
+                            "artist": d.get("uploader") or d.get("channel", "Unknown Artist"),
+                            "url": url,
+                            "duration": d.get("duration", 0)
+                        })
+                    except Exception:
+                        pass
             self.results_ready.emit(songs)
         except Exception:
             self.results_ready.emit([])
@@ -473,11 +483,10 @@ class DownloadWorker(QThread):
 
     def run(self):
         user_folder = get_user_folder(self.user_id)
-        output_template = os.path.join(user_folder, "%(playlist_title,album,uploader)s",
-                                       "%(title)s.%(ext)s") if self.is_album else os.path.join(user_folder,
-                                                                                               "%(title)s.%(ext)s")
+        # Fixed yt-dlp downloading flags to prevent extraction errors
+        output_template = os.path.join(user_folder, "%(title)s.%(ext)s")
         try:
-            cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "-o", output_template, self.url]
+            cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--restrict-filenames", "-o", output_template, self.url]
             subprocess.run(cmd, check=True)
             self.finished.emit(self.title, "success")
         except Exception as e:
@@ -489,8 +498,8 @@ class DownloadOverlayDialog(QDialog):
         super().__init__(parent)
         self.setFixedSize(380, 180)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        self.setStyleSheet(
-            "QDialog { background-color: #161616; border: 1px solid #3b82f6; border-radius: 12px; } QLabel { color: #FFFFFF; }")
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(12)
@@ -527,7 +536,7 @@ class AuthWindow(QDialog):
         self.authenticated_user = None
 
         self.setStyleSheet("""
-            QDialog { background-color: #121212; }
+            QDialog { background-color: #121212; color: #FFFFFF; border: 1px solid #3b82f6; border-radius: 10px; }
             QLabel { color: #FFFFFF; font-family: 'Segoe UI', Arial; }
             QLineEdit { background-color: #222222; border: 1px solid #333; padding: 10px; border-radius: 6px; color: white; font-size: 13px; }
             QPushButton { background-color: #3b82f6; color: #FFFFFF; border-radius: 16px; padding: 10px 20px; font-weight: bold; border: none; }
@@ -654,6 +663,8 @@ class ProfileEditorDialog(QDialog):
         self.setFixedSize(460, 560)
         if os.path.exists(LOGO_FILE):
             self.setWindowIcon(QIcon(LOGO_FILE))
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -759,6 +770,8 @@ class ThemeStudioDialog(QDialog):
         self.setFixedSize(540, 480)
         if os.path.exists(LOGO_FILE):
             self.setWindowIcon(QIcon(LOGO_FILE))
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel("<h3>🎨 HTML/CSS Custom Theme Studio</h3>"))
@@ -776,6 +789,12 @@ QMainWindow {
 QWidget { 
     color: #38bdf8; 
     font-family: 'Segoe UI', Arial; 
+}
+QDialog {
+    background-color: #0f172a;
+    color: #38bdf8;
+    border: 1px solid #0284c7;
+    border-radius: 10px;
 }
 QPushButton { 
     background-color: #0284c7; 
@@ -832,6 +851,8 @@ class PlaylistManagerDialog(QDialog):
         self.setFixedSize(400, 350)
         if os.path.exists(LOGO_FILE):
             self.setWindowIcon(QIcon(LOGO_FILE))
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
         self.parent_app = parent
 
         layout = QVBoxLayout(self)
@@ -911,41 +932,8 @@ class SongEditorDialog(QDialog):
         self.setFixedSize(420, 440)
         if os.path.exists(LOGO_FILE):
             self.setWindowIcon(QIcon(LOGO_FILE))
-
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #161616;
-                color: #FFFFFF;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 13px;
-            }
-            QLabel {
-                color: #FFFFFF;
-                background: transparent;
-            }
-            QLineEdit {
-                background-color: #222222;
-                border: 1px solid #333333;
-                padding: 6px 10px;
-                border-radius: 6px;
-                color: #FFFFFF;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #3b82f6;
-            }
-            QPushButton {
-                background-color: #3b82f6;
-                color: #FFFFFF;
-                border-radius: 16px;
-                padding: 8px 16px;
-                font-weight: bold;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #60a5fa;
-            }
-        """)
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -1045,6 +1033,8 @@ class UserProfileDialog(QDialog):
         self.setFixedSize(480, 720)
         if os.path.exists(LOGO_FILE):
             self.setWindowIcon(QIcon(LOGO_FILE))
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -1531,6 +1521,15 @@ class SpotifyUniqueApp(QMainWindow):
         self.synced_lyrics_lines = []
         self.currently_playing_string = "Not playing anything"
 
+        # Initialize Discord Rich Presence client
+        self.discord_rpc = None
+        if Presence:
+            try:
+                self.discord_rpc = Presence(DISCORD_CLIENT_ID)
+                self.discord_rpc.connect()
+            except Exception:
+                self.discord_rpc = None
+
         if self.current_user.lower() == OWNER_USERNAME.lower():
             conn = get_db_connection()
             c = conn.cursor()
@@ -1618,6 +1617,27 @@ class SpotifyUniqueApp(QMainWindow):
         self.heartbeat_timer.start(5000)
         self.update_presence_heartbeat()
 
+    def update_discord_presence(self, details, state):
+        if self.discord_rpc:
+            try:
+                if self.player.isPlaying():
+                    self.discord_rpc.update(
+                        details=details,
+                        state=state,
+                        large_image="logo",
+                        large_text="Harmonize Music App",
+                        start=int(datetime.datetime.now().timestamp() - (self.player.position() / 1000))
+                    )
+                else:
+                    self.discord_rpc.update(
+                        details="Paused",
+                        state=state,
+                        large_image="logo",
+                        large_text="Harmonize Music App"
+                    )
+            except Exception:
+                pass
+
     def restore_playback_state(self):
         state_file = f"playback_state_user_{self.user_id}.json"
         if os.path.exists(state_file):
@@ -1701,6 +1721,11 @@ class SpotifyUniqueApp(QMainWindow):
     def closeEvent(self, event):
         self.flush_listening_history()
         self.save_playback_state()
+        if self.discord_rpc:
+            try:
+                self.discord_rpc.close()
+            except Exception:
+                pass
         event.accept()
 
     def really_quit(self):
@@ -1714,6 +1739,11 @@ class SpotifyUniqueApp(QMainWindow):
                     worker.wait(1000)
         if hasattr(self, 'tray_icon'):
             self.tray_icon.hide()
+        if self.discord_rpc:
+            try:
+                self.discord_rpc.close()
+            except Exception:
+                pass
         QApplication.quit()
 
     def update_theme_combo_items(self):
@@ -1940,9 +1970,9 @@ class SpotifyUniqueApp(QMainWindow):
         search_bar.addWidget(self.search_btn)
         layout.addLayout(search_bar)
 
-        self.global_results_table = QTableWidget(0, 5)
+        self.global_results_table = QTableWidget(0, 4)
         self.global_results_table.setHorizontalHeaderLabels(
-            ["Title", "Artist", "Status", "Download Track", "Download Full Album"])
+            ["Title", "Artist", "Status", "Download Track"])
         self.global_results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.global_results_table)
 
@@ -2480,6 +2510,7 @@ class SpotifyUniqueApp(QMainWindow):
                 self.update_upcoming_track_display()
                 self.apply_mixer_effects()
                 self.update_presence_heartbeat()
+                self.update_discord_presence(f"🎵 {title}", f"by {artist} ({album})")
 
                 pix = QPixmap(art_path) if art_path and os.path.exists(art_path) else QPixmap()
                 if pix.isNull():
@@ -2621,17 +2652,13 @@ class SpotifyUniqueApp(QMainWindow):
             self.global_results_table.setItem(r, 2, QTableWidgetItem("📥 Catalog"))
 
             dl_btn = QPushButton("⬇️ Song")
-            dl_btn.clicked.connect(lambda chk, row=r: self.download_song(row, False))
+            dl_btn.clicked.connect(lambda chk, row=r: self.download_song(row))
             self.global_results_table.setCellWidget(r, 3, dl_btn)
 
-            dl_alb_btn = QPushButton("💿 Full Album")
-            dl_alb_btn.clicked.connect(lambda chk, row=r: self.download_song(row, True))
-            self.global_results_table.setCellWidget(r, 4, dl_alb_btn)
-
-    def download_song(self, row, is_album):
+    def download_song(self, row):
         song = self.global_search_results[row]
         self.download_overlay = DownloadOverlayDialog(song["title"], self)
-        self.download_worker = DownloadWorker(song["url"], song["title"], self.user_id, is_album)
+        self.download_worker = DownloadWorker(song["url"], song["title"], self.user_id)
         self.download_worker.finished.connect(self.handle_download_finished)
         self.download_worker.start()
         self.download_overlay.exec()
@@ -2789,6 +2816,11 @@ class SpotifyUniqueApp(QMainWindow):
             self.visualizer.stop()
             self.play_btn.setText("▶")
             self.currently_playing_string = "Paused"
+            if self.discord_rpc:
+                try:
+                    self.discord_rpc.clear()
+                except Exception:
+                    pass
         else:
             self.player.play()
             self.visualizer.start()
